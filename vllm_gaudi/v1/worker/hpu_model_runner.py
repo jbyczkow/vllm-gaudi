@@ -5096,7 +5096,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         value_scales = None
 
                     for layer_name in kv_cache_tensor.shared_by:
+<<<<<<< HEAD
                         kv_caches[layer_name] = (key_cache, value_cache, key_scales, value_scales)
+=======
+                        kv_caches[layer_name] = (key_cache, value_cache)
+>>>>>>> d05a6d3 (Update hpu_model_runner.py)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     state_tensors = []
