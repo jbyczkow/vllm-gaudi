@@ -44,6 +44,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     seq_lens_tensor: Optional[torch.Tensor]
     context_lens_tensor: Optional[torch.Tensor]
     query_start_loc: Optional[torch.Tensor] = None
+    query_start_loc_p: Optional[torch.Tensor] = None
 
     def seq_len(self):
         return self.slot_mapping.size(-1)
@@ -61,8 +62,14 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                               seq_lens_tensor,
                               slot_mapping,
                               block_size,
+                              has_initial_states_p,
+                              seq_idx_p,
+                              cu_chunk_seqlen_p,
+                              last_chunk_indices_p,
+                              state_indices_tensor,
                               query_start_loc=None):
         return cls(is_prompt=True,
+                   prep_initial_states=False,
                    block_list=block_list,
                    block_mapping=None,
                    block_usage=None,
@@ -74,7 +81,13 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    input_positions=None,
                    slot_mapping=slot_mapping,
                    block_size=block_size,
-                   query_start_loc=query_start_loc)
+                   has_initial_states_p=has_initial_states_p,
+                   seq_idx_p=seq_idx_p,
+                   cu_chunk_seqlen_p=cu_chunk_seqlen_p,
+                   last_chunk_indices_p=last_chunk_indices_p,
+                   state_indices_tensor=state_indices_tensor,
+                   query_start_loc=query_start_loc,
+                   query_start_loc_p=query_start_loc)
 
     @classmethod
     def make_decode_metadata(cls,
@@ -87,8 +100,10 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              window_block_list,
                              window_block_usage,
                              window_block_groups,
+                             state_indices_tensor,
                              query_start_loc=None):
         return cls(is_prompt=False,
+                   prep_initial_states=False,
                    block_mapping=None,
                    alibi_blocks=None,
                    attn_bias=None,
@@ -103,4 +118,5 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    input_positions=input_positions,
                    slot_mapping=slot_mapping,
                    block_size=block_size,
+                   state_indices_tensor=state_indices_tensor,
                    query_start_loc=query_start_loc)

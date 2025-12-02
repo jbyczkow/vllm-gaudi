@@ -121,6 +121,18 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     block_size: int
+
+    #num_prefills: int
+    #num_prefill_tokens: int
+    #num_decodes: int
+    #num_decode_tokens: int
+
+    # seq_lens: Optional[torch.Tensor] = None
+    # seq_lens_tensor to be used instead
+
+    prep_initial_states: bool
+    # chunk_size: int
+
     slot_mapping: torch.Tensor
     attn_bias: Optional[torch.Tensor]
     seq_lens_tensor: Optional[torch.Tensor]
@@ -142,6 +154,12 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     window_block_groups: Optional[torch.Tensor] = None
     window_block_usage: Optional[torch.Tensor] = None
     window_attn_bias: Optional[torch.Tensor] = None
+
+    has_initial_states_p: Optional[torch.Tensor] = None
+    seq_idx_p: Optional[torch.Tensor] = None
+    cu_chunk_seqlen_p: Optional[torch.Tensor] = None
+    last_chunk_indices_p: Optional[torch.Tensor] = None
+    state_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
 
 
 @dataclass
