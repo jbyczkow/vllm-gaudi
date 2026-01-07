@@ -5120,8 +5120,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             kv_cache_spec = group.kv_cache_spec
             for layer_name in group.layer_names:
                 kv_cache = kv_caches[layer_name]
-                print(f'{layer_name} kv_cache shape {kv_cache.shape}')
                 if isinstance(kv_cache_spec, AttentionSpec) and kv_cache.shape[0] == 2:
+                    print(f'{layer_name} kv_cache shape {kv_cache.shape}')
                     assert kv_cache.shape[1] != 2, (
                         "Fail to determine whether the layout is "
                         "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
@@ -5190,6 +5190,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                # Only process tensors for layers in the current group
+                # TODO: The loops should be handled smarter, so this check is not needed
+                if not set(kv_cache_tensor.shared_by).intersection(set(kv_cache_group.layer_names)):
+                    continue
                 assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
                 num_blocks = \
                     kv_cache_tensor.size // kv_cache_spec.page_size_bytes
@@ -5264,10 +5268,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
-            layer_names = set()
-            for group in kv_cache_config.kv_cache_groups:
-                layer_names.update(group.layer_names)
-            assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
+        layer_names = set()
+        for group in kv_cache_config.kv_cache_groups:
+            layer_names.update(group.layer_names)
+        assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
         bind_kv_cache(kv_caches, self.vllm_config.compilation_config.static_forward_context, self.kv_caches)
 
         if self.enable_bucketing:
