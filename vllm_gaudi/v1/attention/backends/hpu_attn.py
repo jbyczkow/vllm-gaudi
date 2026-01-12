@@ -44,6 +44,14 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     seq_lens_tensor: Optional[torch.Tensor]
     context_lens_tensor: Optional[torch.Tensor]
     query_start_loc: Optional[torch.Tensor] = None
+    query_start_loc_p: Optional[torch.Tensor] = None
+
+    num_computed_tokens_p: Optional[torch.Tensor] = None
+    block_idx_last_computed_token_p: Optional[torch.Tensor] = None
+    block_idx_first_scheduled_token_p: Optional[torch.Tensor] = None
+    block_idx_last_scheduled_token_p: Optional[torch.Tensor] = None
+
+    additional_data: Optional[torch.Tensor] = None
 
     def seq_len(self):
         return self.slot_mapping.size(-1)
@@ -61,7 +69,18 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                               seq_lens_tensor,
                               slot_mapping,
                               block_size,
-                              query_start_loc=None):
+                              prep_initial_states,
+                              has_initial_states_p,
+                              seq_idx_p,
+                              cu_chunk_seqlen_p,
+                              last_chunk_indices_p,
+                              state_indices_tensor,
+                              num_computed_tokens_p=None,
+                              block_idx_last_computed_token_p=None,
+                              block_idx_first_scheduled_token_p=None,
+                              block_idx_last_scheduled_token_p=None,
+                              query_start_loc=None,
+                              additional_data=None):
         return cls(is_prompt=True,
                    block_list=block_list,
                    block_mapping=None,
@@ -74,7 +93,19 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    input_positions=None,
                    slot_mapping=slot_mapping,
                    block_size=block_size,
-                   query_start_loc=query_start_loc)
+                   prep_initial_states=prep_initial_states,
+                   has_initial_states_p=has_initial_states_p,
+                   seq_idx_p=seq_idx_p,
+                   cu_chunk_seqlen_p=cu_chunk_seqlen_p,
+                   last_chunk_indices_p=last_chunk_indices_p,
+                   state_indices_tensor=state_indices_tensor,
+                   num_computed_tokens_p=num_computed_tokens_p,
+                   block_idx_last_computed_token_p=block_idx_last_computed_token_p,
+                   block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
+                   block_idx_last_scheduled_token_p=block_idx_last_scheduled_token_p,
+                   query_start_loc=query_start_loc,
+                   query_start_loc_p=query_start_loc,
+                   additional_data=additional_data)
 
     @classmethod
     def make_decode_metadata(cls,
@@ -87,12 +118,15 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              window_block_list,
                              window_block_usage,
                              window_block_groups,
-                             query_start_loc=None):
+                             state_indices_tensor,
+                             query_start_loc=None,
+                             seq_lens_tensor=None,
+                             additional_data=None):
         return cls(is_prompt=False,
                    block_mapping=None,
                    alibi_blocks=None,
                    attn_bias=None,
-                   seq_lens_tensor=None,
+                   seq_lens_tensor=seq_lens_tensor,
                    context_lens_tensor=None,
                    block_list=block_list,
                    block_usage=block_usage,
@@ -103,4 +137,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    input_positions=input_positions,
                    slot_mapping=slot_mapping,
                    block_size=block_size,
-                   query_start_loc=query_start_loc)
+                   prep_initial_states=None,
+                   state_indices_tensor=state_indices_tensor,
+                   query_start_loc=query_start_loc,
+                   query_start_loc_p=query_start_loc,
+                   additional_data=additional_data)
