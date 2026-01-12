@@ -5,7 +5,8 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
+from vllm.attention.backends.abstract import MultipleOf
 
 import torch
 
@@ -31,6 +32,11 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
         return HPUAttentionMetadataV1
+
+    # need to check if we need support for virtual spliting for mamba
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+        return [128]
 
 
 @dataclass
