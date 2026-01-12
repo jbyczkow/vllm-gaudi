@@ -2325,7 +2325,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory
         )
         query_start_loc_p_cpu[1:] = torch.cumsum(
-            torch.tensor(seq_lens_cpu, dtype=torch.int32),
+            seq_lens_cpu.clone().to(dtype=torch.int32),
             dim=0
         )
 
