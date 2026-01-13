@@ -51,6 +51,66 @@ def ssd_cumsum(
 
     return dA_cumsum, dt
 
+def new_chunk_cumsum(dt, A, chunk_size, cu_chunk_seqlens, dt_bias=None, dt_softplus=False, dt_limit=(0.0, float("inf"))):
+    """
+    Arguments:
+        dt: Tensor - (seqlen, nheads)
+        A: Tensor - (nheads)
+        chunk_size: int
+        cu_chunk_seqlens: Tensor - (nchunks + 1)
+        dt_bias: Optional Tensor - (nheads)
+        dt_softplus: bool
+        dt_limit: tuple - (min: float, max: float)
+
+    Return:
+        dA_cumsum: Tensor - (nheads, nchunks, chunk_size)
+        dt_out: Tensor - (nheads, nchunks, chunk_size)
+    """
+    seqlen, nheads = dt.shape
+    nchunks = cu_chunk_seqlens.shape[0] - 1
+    dt_min, dt_max = dt_limit
+
+    dt_out = torch.zeros(nheads, nchunks, chunk_size, device=dt.device, dtype=torch.float32)
+    dA_cumsum = torch.zeros(nheads, nchunks, chunk_size, device=dt.device, dtype=torch.float32)
+
+    dt = dt.float()
+    A = A.float()
+    if dt_bias is not None:
+        dt_bias = dt_bias.float()
+    
+    mask = None
+    if dt_softplus is not None:
+        mask = dt <= 20.0
+
+    for c in range(nchunks):
+        s0 = cu_chunk_seqlens[c].item()
+        s1 = cu_chunk_seqlens[c + 1].item()
+        chunk_len = s1 - s0
+
+        if chunk_len == 0:
+            continue
+
+        dt_chunk = dt[s0:s1, :].t()
+        
+        if dt_bias is not None:
+            dt_chunk = dt_chunk + dt_bias.unsqueeze(1)
+        
+        if dt_softplus:
+            chunk_mask = mask[s0:s1, :].t()
+            dt_chunk = torch.where(chunk_mask, F.softplus(dt_chunk), dt_chunk)
+        
+        dt_chunk = torch.clamp(dt_chunk, dt_min, dt_max)
+
+        dt_out[:, c, :chunk_len] = dt_chunk
+        dA = dt_chunk * A.unsqueeze(1)
+
+        dA_padded = torch.zeros(nheads, chunk_size, dtype=torch.float32, device=dt.device)
+        dA_padded[:, :chunk_len] = dA
+
+        dA_cs = torch.cumsum(dA_padded, dim=1)
+        dA_cumsum[:, c, :] = dA_cs
+    return dA_cumsum, dt_out
+
 
 def ssd_x_to_state(B, x, dt, dA_cumsum, seq_idx=None, states=None, states_in_fp32=True):
     """Compute the state for each intra-chunk
@@ -97,6 +157,55 @@ def ssd_x_to_state(B, x, dt, dA_cumsum, seq_idx=None, states=None, states_in_fp3
 
     return states  # (batch, nchunks, nheads, headdim, dstate)
 
+def new_chunk_state(B, x, dt, dA_cumsum, cu_chunk_seqlens, states=None, states_in_fp32=True):
+    """
+    Arguments:
+        B: Tensor - (seqlen, ngroups, dstate)
+        x: Tensor - (seqlen, nheads, hdim)
+        dt: Tensor - (nheads, nchunks, chunk_size)
+        dA_cumsum: Tensor - (nheads, nchunks, chunk_siz)
+        cu_chunk_seqlens: Tensor - (nchunks + 1)
+        states: Optional Tensor - (nchunks, nheads, hdim, dstate)
+        states_in_fp32: bool
+
+    Return:
+        states: Tensor - (nchunks, nheads, hdim, dstate)
+    """
+    seqlen, nheads, hdim = x.shape
+    _, nchunks, chunk_size = dt.shape
+    _, ngroups, dstate = B.shape
+    nheads_ngroups_ratio = nheads // ngroups
+
+    if states is None:
+        states_dtype = torch.float32 if states_in_fp32 else B.dtype
+        states = torch.empty(nchunks, nheads, hdim, dstate, device=x.device, dtype=states_dtype)
+
+    x_dtype = x.dtype
+
+    for c in range(nchunks):
+        s0 = cu_chunk_seqlens[c].item()
+        s1 = cu_chunk_seqlens[c+1].item()
+        chunk_len = s1 - s0
+
+        x_chunk = x[s0:s1, :, :]
+        B_chunk = B[s0:s1, :, :].repeat_interleave(nheads_ngroups_ratio, dim=1)
+        dt_chunk = dt[:, c, :chunk_len]
+        dA_cumsum_chunk = dA_cumsum[:, c, :chunk_len]
+
+        B_chunk = B_chunk.float()
+        dt_chunk = dt_chunk.float()
+        dA_cumsum_chunk = dA_cumsum_chunk.float()
+
+        dA_cs_last = dA_cumsum_chunk[:, -1]
+        scale = torch.exp(dA_cs_last.unsqueeze(1) - dA_cumsum_chunk) * dt_chunk
+        B_scaled = (B_chunk * scale.t().unsqueeze(2)).to(x_dtype)
+
+        x_perm = x_chunk.permute(1,2,0)
+        B_perm = B_scaled.permute(1,0,2)
+
+        state = torch.bmm(x_perm, B_perm)
+        states[c, :, :, :] = state.to(states.dtype)
+    return states
 
 def ssd_segsum(x, do_cumsum=True, is_causal=True):
     """Naive segment sum calculation.
@@ -137,20 +246,25 @@ def ssd_state_passing(states, dA_chunk_cumsum, initial_states=None, seq_idx=None
     states, final_state = new_states[:, 1:], new_states[:, 1:]
     return states.to(out_dtype), final_state
 
-def new_chunk_scan(
-    cb, # (nchunks, ngroups, chunk_size, chunk_size)
-    x, # (seqlen, nheads, hdim)
-    dt, # (nheads, nchunks, chunk_size)
-    dA_cumsum, # (nheads, nchunks, chunk_size)
-    C, # (seqlen, ngroups, dstate)
-    states, # (nchunks, nheads, hdim, dstate)
-    cu_chunk_seqlens, # (nchunks + 1)
-    output,
-    seq_idx, # (nchunks)
-    D=None, # (nheads, hdim) or (nheads)
-    z=None, # (seqlen, nheads, hdim)
-    initial_states=None # (batch, nheads, hdim, dstate)
-):
+def new_chunk_scan(cb, x, dt, dA_cumsum, C, states, cu_chunk_seqlens, output, seq_idx, D=None, z=None, initial_states=None):
+    """
+    Arguments:
+        cb: Tensor - (nchunks, ngroups, chunk_size, chunk_size)
+        x: Tensor - (seqlen, nheads, hdim)
+        dt: Tensor - (nheads, nchunks, chunk_size)
+        dA_cumsum: Tensor - (nheads, nchunks, chunk_size)
+        C: Tensor - (seqlen, ngroups, dstate)
+        states: Tensor - (nchunks, nheads, hdim, dstate)
+        cu_chunk_seqlens: Tensor - (nchunks + 1)
+        output: Tensor - (seqlen, nheads, hdim)
+        seq_idx: Tensor - (nchunks)
+        D: Optional Tensor - (nheads, hdim) or (nheads)
+        z: Optional Tensor - (seqlen, nheads, hdim)
+        initial_states: Optional Tensor - (batch, nheads, hdim, dstate)
+
+    Return:
+        output: Tensor - (seqlen, nheads, hdim)
+    """
     device = x.device
     dtype = x.dtype
     seqlen, nheads, hdim = x.shape
@@ -164,40 +278,34 @@ def new_chunk_scan(
         s0 = cu_chunk_seqlens[c].item()
         s1 = cu_chunk_seqlens[c + 1].item()
         chunk_len = s1 - s0
-        if isinstance(seq_idx[c], torch.Tensor):
-            seq = int(seq_idx[c].item())
-            seq_prev = int(seq_idx[c - 1].item()) if c > 0 else -1
-        else:
-            seq = int(seq_idx[c])
-            seq_prev = int(seq_idx[c - 1]) if c > 0 else -1
+
+        seq = int(seq_idx[c].item())
+        seq_prev = int(seq_idx[c - 1].item()) if c > 0 else -1
         new_sequence_start = seq != seq_prev
         for h in range(nheads):
             g = h // nheads_ngroups_ratio
             C_chunk = C[s0:s1, g].float()
-            dA_cs = dA_cumsum[h, c, :chunk_len].float()
-            scale_m = torch.exp(dA_cs)
             dt_chunk = dt[h, c, :chunk_len].float()
             cb_chunk = cb[c, g, :chunk_len, :chunk_len].float()
 
             if initial_states is not None and new_sequence_start:
-                prev_state = initial_states[seq, h].float() # (hdim, dstate)
+                prev_state = initial_states[seq, h].float()
             elif not new_sequence_start and c > 0:
                 prev_state = states[c - 1, h].float()
             else:
                 prev_state = torch.zeros((hdim, dstate), device=device)
-            acc = (C_chunk @ prev_state.T) * scale_m[:, None]
-            # acc = torch.zeros((chunk_len, hdim), device=device, dtype=dtype)
-            # for m in range(chunk_len):
-            #     acc[m] = (C_chunk[m] @ prev_state.T) * scale_m[m]
-            # acc = (C_chunk @ prev_state.T) * scale_m.unsqueeze(-1) # (chunk_len, chunk_len)
+
+            dA_cs = dA_cumsum[h, c, :chunk_len].float()
             dA_m = dA_cs[:, None]
             dA_k = dA_cs[None, :]
             diff = torch.clamp(dA_m - dA_k, -30.0, 30.0)
             decay = torch.exp(diff)
-            casual = torch.tril(torch.ones((chunk_len, chunk_len), device=device))
-            coeff = cb_chunk * decay * dt_chunk[None, :] * casual
-            acc += coeff @ x[s0:s1, h].float()
+            causal = torch.tril(torch.ones((chunk_len, chunk_len), device=device))
+            coeff = cb_chunk * decay * dt_chunk[None, :] * causal
 
+            scale_m = torch.exp(dA_cs)
+            acc = (C_chunk @ prev_state.T) * scale_m[:, None]
+            acc += coeff @ x[s0:s1, h].float()
 
             if D is not None:
                 acc += x[s0:s1, h].float() * D[h]
@@ -211,43 +319,50 @@ def new_chunk_scan(
     output.copy_(out)
 
 def new_ssd_state_passing(states, dA_cumsum, cu_chunk_seqlens, seq_idx, initial_states=None, out_dtype=None):
-    nchunks, nheads, dim = states.shape
+    """
+    Arguments:
+        states: Tensor - (nchunks, nheads, hdim)
+        dA_cumsum: Tensor - (nheads, nchunks, chunk_size)
+        cu_chunk_seqlens: Tensor - (nchunks + 1)
+        seq_idx: Tensor - (nchunks)
+        initial_states: Optional Tensor - (batch, nheads, hdim,)
+        out_dtype: Optional dtype
+    Return:
+        output: Tensor - (nchunks, nheads, hdim)
+    """
+    nchunks, nheads, hdim = states.shape
     assert dA_cumsum.shape[0] == nheads and dA_cumsum.shape[1] == nchunks
     assert seq_idx.shape == (nchunks,)
     if initial_states is not None:
-        assert initial_states.ndim == 3 and initial_states.shape[1] == nheads and initial_states.shape[2] == dim
+        assert initial_states.ndim == 3 and initial_states.shape[1] == nheads and initial_states.shape[2] == hdim
     
     out_dtype = states.dtype if out_dtype is None else out_dtype
     device = states.device
     
     compute_dtype = torch.float32
     if initial_states is not None:
-        states_t = initial_states[0].to(dtype=compute_dtype, device=device).clone() if initial_states is not None else torch.zeros((nheads, dim), device=device, dtype=compute_dtype)
+        states_t = initial_states[0].to(dtype=compute_dtype, device=device).clone() if initial_states is not None else torch.zeros((nheads, hdim), device=device, dtype=compute_dtype)
     else:
-        states_t = torch.zeros((nheads, dim), device=device, dtype=compute_dtype)
+        states_t = torch.zeros((nheads, hdim), device=device, dtype=compute_dtype)
         
-    out = torch.empty((nchunks, nheads, dim), device=device, dtype=out_dtype)
+    out = torch.empty((nchunks, nheads, hdim), device=device, dtype=out_dtype)
     
     prev_seq_idx = int(0)
-    # dA_cs for chunk c is dA_cumsum[:, c, chunk_size-1]
     last_pos = dA_cumsum.shape[-1] - 1
-    
     for c in range(nchunks):
-        new_states = states[c].to(dtype=compute_dtype) #(nheads, dim)
-        dA_cs = dA_cumsum[:, c, last_pos].to(dtype=compute_dtype) #(nheads)
-        seq = int(seq_idx[c].item()) if isinstance(seq_idx[c], torch.Tensor) else int(seq_idx[c])
-        
-        #on seq change, reload initial state for that seq (if provided) or zer
+        new_states = states[c].to(dtype=compute_dtype)
+        dA_cs = dA_cumsum[:, c, last_pos].to(dtype=compute_dtype)
+        seq = int(seq_idx[c].item())
+
         if seq != prev_seq_idx:
             if initial_states is not None:
-                #initial states[seq, head, :]
                 states_t = initial_states[seq].to(dtype=compute_dtype)
             else:
-                states_t = torch.zeros((nheads, dim), device=device, dtype=compute_dtype)
+                states_t = torch.zeros((nheads, hdim), device=device, dtype=compute_dtype)
             prev_seq_idx = seq
-        #pdate states = exp(dA_cs)  * states + new states
-        scale = torch.exp(dA_cs).unsqueeze(1) #(nheads, 1)
-        states_t = scale * states_t + new_states #nheads, dim)
+
+        scale = torch.exp(dA_cs).unsqueeze(1)
+        states_t = scale * states_t + new_states
         
         out[c] = states_t.to(dtype=out_dtype)
     return out
@@ -297,6 +412,54 @@ def ssd_bmm(a, b, chunk_size, seq_idx=None, causal=False, output_dtype=None):
     out = torch.einsum("bcglk, bcgzk->bcglz", a, b).to(out_dtype)
     return out  # (batch, nchunks, ngroups, chunk_size, chunk_size)
 
+
+def new_ssd_bmm(a, b, chunk_size, cu_chunk_seqlens, causal=False, output_dtype=None):
+    """
+    Arguments:
+        a: Tensor - (seqlen, ngroups, k)
+        b: Tensor - (seqlen, ngroups, k)
+        chunk_size: int
+        cu_chunk_seqlens: Tensor - (nchunks + 1)
+        causal: bool
+        out_dtype: Optional dtype
+    Return:
+        output: Tensor - (chunks, ngroups, chunk_size, chunk_size)
+    """
+    seqlen, ngroups, k = a.shape
+    nchunks = cu_chunk_seqlens.shape[0] - 1
+    if a.stride(-1) != 1 and a.stride(0) != 1:
+        a = a.contiguous()
+    if b.stride(-1) != 1 and b.stride(0) != 1:
+        b = b.contiguous()
+    out_dtype = output_dtype if output_dtype is not None else a.dtype
+    out = torch.zeros(
+        (nchunks, ngroups, chunk_size, chunk_size),
+        device=a.device,
+        dtype=out_dtype
+    )
+
+    mask = None
+    if causal:
+        mask = torch.triu(torch.ones(chunk_size, chunk_size, device=a.device, dtype=torch.bool), diagonal=1)
+
+    for c in range(nchunks):
+        s0 = cu_chunk_seqlens[c].item()
+        s1 = cu_chunk_seqlens[c + 1].item()
+        chunk_len = s1 - s0
+        if chunk_len <= 0:
+            continue
+
+        for h in range(ngroups):
+
+            aC = a[s0:s1, h, :].float()
+            bC = b[s0:s1, h, :].float()
+            chunk_out = torch.matmul(aC, bC.T)
+
+            if causal:
+                mask_chunk = mask[:chunk_len, :chunk_len]
+                chunk_out.masked_fill_(mask_chunk, 0.0)
+            out[c, h, :chunk_len, :chunk_len] = chunk_out.to(out_dtype)
+    return out
 
 def ssd_scan(cb, x, dt, dA_cumsum, C, states, D=None, z=None, seq_idx=None, dtype=torch.float32):
     """PyTorch equivalent non-chunked implementation for _chunk_scan_fwd
