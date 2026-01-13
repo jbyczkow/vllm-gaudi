@@ -4985,18 +4985,22 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             kv_cache_spec = group.kv_cache_spec
             for layer_name in group.layer_names:
                 kv_cache = kv_caches[layer_name]
-                if isinstance(kv_cache_spec, AttentionSpec) and kv_cache.shape[0] == 2:
-                    print(f'{layer_name} kv_cache shape {kv_cache.shape}')
-                    assert kv_cache.shape[1] != 2, (
-                        "Fail to determine whether the layout is "
-                        "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
-                        f"a tensor of shape {kv_cache.shape}"
-                    )
-                    hidden_size = kv_cache.shape[2:].numel()
-                    kv_cache.as_strided_(
-                        size=kv_cache.shape,
-                        stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
-                    )
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    # kv_cache is a tuple: (key_cache, value_cache, key_scales, value_scales)
+                    key_cache = kv_cache[0] if isinstance(kv_cache, (tuple, list)) else kv_cache
+                    # TODO: check if this scenario is even possible
+                    if hasattr(key_cache, 'shape') and key_cache.shape[0] == 2:
+                        print(f'{layer_name} kv_cache shape {kv_cache.shape}')
+                        assert kv_cache.shape[1] != 2, (
+                            "Fail to determine whether the layout is "
+                            "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
+                            f"a tensor of shape {kv_cache.shape}"
+                        )
+                        hidden_size = kv_cache.shape[2:].numel()
+                        kv_cache.as_strided_(
+                            size=kv_cache.shape,
+                            stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
+                        )
                     
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -5141,6 +5145,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
+        # TODO: Merge loops for groups
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             layer_names.update(group.layer_names)
@@ -5168,9 +5173,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                                  self.block_size, dtype, self.profiler)
             logger.info("Allocating unified persistent batch took %.4f GB of host memory",
                         m.consumed_host_memory / float(2**30))
-
-        if has_mamba:
-            self._update_hybrid_attention_mamba_layout(kv_caches)
+        # TODO: check if this one is needed; for now seems that not
+        # if has_mamba:
+        #     self._update_hybrid_attention_mamba_layout(kv_caches)
 
         htorch.hpu.synchronize()
 
