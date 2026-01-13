@@ -67,26 +67,19 @@ except (ImportError, AttributeError):
 @disable_compile
 def get_chunk_cumsum_impl():
     """
-    Returns the chunk cumsum implementation (ssd_cumsum or _chunk_cumsum_fwd).
+    Returns the chunk cumsum implementation (new_chunk_cumsum or _chunk_cumsum_fwd).
     
     PyTorch version signature:
-        ssd_cumsum(dt, A, chunk_size, dt_bias=None, dt_softplus=False, 
-                   dt_limit=(0.0, float("inf")), softplus_thres=20.0)
-    
-    Note: PyTorch version expects dt shape: (batch, seqlen, nheads)
-          Triton version expects dt shape: (seqlen, nheads)
+        new_chunk_cumsum(dt, A, chunk_size, cu_chunk_seqlens, dt_bias=None,
+                   dt_softplus=False, dt_limit=(0.0, float("inf")))
     """
-    # Import both implementations
-    from .pytorch_implementation import ssd_cumsum
-    
-    # Create wrapped PyTorch version
-    pytorch_wrapped = _wrap_ssd_cumsum(ssd_cumsum)
+    from .pytorch_implementation import new_chunk_cumsum
     
     # Return a runtime dispatcher
     @disable_compile
     def dispatcher(dt, A, chunk_size, cu_chunk_seqlens, dt_bias=None, 
                    dt_softplus=False, dt_limit=(0.0, float("inf"))):
-        return pytorch_wrapped(dt, A, chunk_size, cu_chunk_seqlens, dt_bias, dt_softplus, dt_limit)
+        return new_chunk_cumsum(dt, A, chunk_size, cu_chunk_seqlens, dt_bias, dt_softplus, dt_limit)
 
     return dispatcher
 
@@ -94,13 +87,12 @@ def get_chunk_cumsum_impl():
 @disable_compile
 def get_ssd_state_passing_impl():
     """
-    Returns the state passing implementation (ssd_state_passing or _state_passing_fwd).
+    Returns the state passing implementation (new_ssd_state_passing or _state_passing_fwd).
     
     PyTorch version signature:
-        ssd_state_passing(states, dA_chunk_cumsum, initial_states=None, seq_idx=None, 
-                         chunk_size=None, out_dtype=None)
+        new_ssd_state_passing(states, dA_cumsum, cu_chunk_seqlens, seq_idx, initial_states=None,
+                            out_dtype=None)
     """
-    # Import both implementations
     from .pytorch_implementation import new_ssd_state_passing
 
     # Return a runtime dispatcher
@@ -114,12 +106,12 @@ def get_ssd_state_passing_impl():
 @disable_compile
 def get_ssd_scan_impl():
     """
-    Returns the chunk scan implementation (ssd_scan or _chunk_scan_fwd).
+    Returns the chunk scan implementation (new_chunk_scan or _chunk_scan_fwd).
     
     PyTorch version signature:
-        ssd_scan(cb, x, dt, dA_cumsum, C, states, D=None, z=None, seq_idx=None, dtype=torch.float32)
+        new_chunk_scan(cb, x, dt, dA_cumsum, C, states, cu_chunk_seqlens, output, seq_idx, D=None,
+                    z=None, initial_states=None)
     """
-    # Import both implementations
     from .pytorch_implementation import new_chunk_scan
 
     # Return a runtime dispatcher
@@ -132,21 +124,17 @@ def get_ssd_scan_impl():
 @disable_compile
 def get_chunk_state_impl():
     """
-    Returns the chunk state implementation (ssd_x_to_state or _chunk_state_fwd).
+    Returns the chunk state implementation (new_chunk_state or _chunk_state_fwd).
     
     PyTorch version signature:
-        ssd_x_to_state(B, x, dt, dA_cumsum, seq_idx=None, states=None, states_in_fp32=True)
+        new_chunk_state(B, x, dt, dA_cumsum, cu_chunk_seqlens, states=None, states_in_fp32=True)
     """
-    # Import both implementations
-    from .pytorch_implementation import ssd_x_to_state
-    
-    # Create wrapped PyTorch version
-    pytorch_wrapped = _wrap_ssd_x_to_state(ssd_x_to_state)
+    from .pytorch_implementation import new_chunk_state
     
     # Return a runtime dispatcher
     @disable_compile
     def dispatcher(B, x, dt, dA_cumsum, cu_chunk_seqlens, states=None, states_in_fp32=True):
-        return pytorch_wrapped(B, x, dt, dA_cumsum, cu_chunk_seqlens, states, states_in_fp32)
+        return new_chunk_state(B, x, dt, dA_cumsum, cu_chunk_seqlens, states, states_in_fp32)
 
     return dispatcher
 
@@ -154,21 +142,17 @@ def get_chunk_state_impl():
 @disable_compile
 def get_bmm_chunk_impl():
     """
-    Returns the BMM chunk implementation (ssd_bmm or _bmm_chunk_fwd).
+    Returns the BMM chunk implementation (new_ssd_bmm or _bmm_chunk_fwd).
     
     PyTorch version signature:
-        ssd_bmm(a, b, chunk_size, seq_idx=None, causal=False, output_dtype=None)
+        new_ssd_bmm(a, b, chunk_size, cu_chunk_seqlens, causal=False, output_dtype=None)
     """
-    # Import both implementations
-    from .pytorch_implementation import ssd_bmm
-    
-    # Create wrapped PyTorch version
-    pytorch_wrapped = _wrap_ssd_bmm(ssd_bmm)
+    from .pytorch_implementation import new_ssd_bmm
     
     # Return a runtime dispatcher
     @disable_compile
     def dispatcher(a, b, chunk_size, cu_chunk_seqlens, causal=False, output_dtype=None):
-        return pytorch_wrapped(a, b, chunk_size, cu_chunk_seqlens, causal, output_dtype)
+        return new_ssd_bmm(a, b, chunk_size, cu_chunk_seqlens, causal, output_dtype)
 
     return dispatcher
 
