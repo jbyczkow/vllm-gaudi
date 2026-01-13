@@ -1103,6 +1103,35 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     cache_dtype_str=cache_dtype_str,
                 )
 
+            elif isinstance(attn_module, MambaMixer2):
+                mamba_module = attn_module
+                if (self.vllm_config.speculative_config is not None
+                        and self.vllm_config.model_config.hf_config.model_type
+                        not in ["qwen3_next"]):
+                    raise NotImplementedError(
+                        "Mamba with speculative decoding is not supported yet.")
+                if self.vllm_config.cache_config.enable_prefix_caching:
+                    raise NotImplementedError(
+                        "Prefix caching is not supported for Mamba yet.")
+                max_model_len = self.vllm_config.model_config.max_model_len
+
+                page_size_padded = (
+                    self.vllm_config.cache_config.mamba_page_size_padded)
+
+                # Set block_size to max_model_len, so that mamba model will always
+                # have only one block in the KV cache.
+                kv_cache_spec[layer_name] = MambaSpec(
+                    shapes=mamba_module.get_state_shape(),
+                    dtypes=mamba_module.get_state_dtype(),
+                    block_size=max_model_len,
+                    page_size_padded=page_size_padded,
+                    mamba_type=mamba_module.mamba_type,
+                    #num_speculative_blocks=(
+                    #    self.speculative_config.num_speculative_tokens
+                    #    if self.speculative_config else 0),
+                )
+                #logger.info(f"KV cache spec for Mamba layer {layer_name} {mamba_module}: {kv_cache_spec[layer_name]}")
+
         return kv_cache_spec
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
@@ -5168,6 +5197,18 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
                     for layer_name in kv_cache_tensor.shared_by:
                         kv_caches[layer_name] = (key_cache, value_cache, key_scales, value_scales)
+
+                elif isinstance(kv_cache_spec, MambaSpec):
+                    for layer_name in kv_cache_tensor.shared_by:
+                        state_tensors = []
+                        for (shape, dtype) in zip(kv_cache_spec.shapes,
+                                                    kv_cache_spec.dtypes):
+                            cache_shape = (num_blocks + 1,) + tuple(shape)
+                            tensor = torch.zeros(cache_shape,
+                                                    dtype=dtype,
+                                                    device=self.device)
+                            state_tensors.append(tensor)
+                        kv_caches[layer_name] = state_tensors
 
                 else:
                     # TODO: add new branches when introducing more types of
