@@ -323,6 +323,9 @@ def hpu_causal_conv1d_fn(
         # cache_write_mask: whether to WRITE updated state to conv_states
         should_read_cache = conv_states is not None and state_len > 0 and cache_read_mask[seq_idx]
         should_write_cache = conv_states is not None and state_len > 0 and cache_write_mask[seq_idx]
+        if not (0 <= batch_cache_idx[seq_idx] < conv_states.size(0)):
+            should_read_cache = False
+            should_write_cache = False
 
         if should_read_cache:
             cache_idx = batch_cache_idx[seq_idx]

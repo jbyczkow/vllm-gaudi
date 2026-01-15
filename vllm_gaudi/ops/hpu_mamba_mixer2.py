@@ -526,7 +526,6 @@ class HPUMambaMixer2(MambaMixer2):
             x = hidden_states_B_C.transpose(
                 0, 1
             )  # this is the form that causal-conv see
-            #print(f"{num_prefill_tokens}")
             hidden_states_B_C = hpu_causal_conv1d_fn(
                 x,
                 self.conv_weights,
