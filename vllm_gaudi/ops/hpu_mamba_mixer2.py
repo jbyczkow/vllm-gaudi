@@ -44,7 +44,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
-from vllm_gaudi.ops.causal_conv1d_pytorch_fp32 import (
+from vllm_gaudi.ops.causal_conv1d_pytorch import (
     hpu_causal_conv1d_fn,
     hpu_causal_conv1d_update,
 )
@@ -470,7 +470,7 @@ class HPUMambaMixer2(MambaMixer2):
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
-            state_indices_tensor = attn_metadata.state_indices_tensor
+            state_indices_tensor = attn_metadata.state_indices_tensor_mamba
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             # is below sufficient to get chunk_size or does it need to passed via metadata
@@ -479,6 +479,7 @@ class HPUMambaMixer2(MambaMixer2):
             query_start_loc_p = attn_metadata.query_start_loc_p
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
+            padding_mask_flat = attn_metadata.padding_mask_flat
 
         if attn_metadata is None:
             # profile run
@@ -523,9 +524,11 @@ class HPUMambaMixer2(MambaMixer2):
             #   are provided (which are pointers into
             #   "state_indices_tensor"), it will write additional cache
             #   states aligned at "block_size_to_align".
-            x = hidden_states_B_C.transpose(
-                0, 1
-            )  # this is the form that causal-conv see
+            assert padding_mask_flat is not None
+            x = hidden_states_B_C.transpose(0, 1)  # this is the form that causal-conv see
+            hidden_states_B_C = hidden_states_B_C * padding_mask_flat
+            dt = dt * padding_mask_flat
+
             hidden_states_B_C = hpu_causal_conv1d_fn(
                 x,
                 self.conv_weights,
@@ -541,8 +544,10 @@ class HPUMambaMixer2(MambaMixer2):
                 block_size_to_align=mamba_block_size,
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
+                is_prompt=True,
             ).transpose(0, 1)
 
+            hidden_states_B_C = hidden_states_B_C * padding_mask_flat
             hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(
                 hidden_states_B_C
             )
@@ -585,6 +590,7 @@ class HPUMambaMixer2(MambaMixer2):
                 out=output.view(output.shape[0], -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
             )
+            output = output * padding_mask_flat.view(output.shape[0], 1)
 
             if prefix_caching_enabled:
                 # The chunk_stride is the number of chunks per mamba block
@@ -693,7 +699,7 @@ class HPUMambaMixer2(MambaMixer2):
                 conv_state_indices=state_indices_tensor,
                 block_idx_last_scheduled_token=block_idx_last_computed_token,
                 initial_state_idx=block_idx_last_computed_token,
-                #query_start_loc=query_start_loc_p,
+                query_start_loc=query_start_loc_p,
             )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(

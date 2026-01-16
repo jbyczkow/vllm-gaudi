@@ -325,6 +325,9 @@ def hpu_causal_conv1d_fn(
         # cache_write_mask: whether to WRITE updated state to conv_states
         should_read_cache = conv_states is not None and state_len > 0 and cache_read_mask[seq_idx]
         should_write_cache = conv_states is not None and state_len > 0 and cache_write_mask[seq_idx]
+        if not (0 <= batch_cache_idx[seq_idx] < conv_states.size(0)):
+            should_read_cache = False
+            should_write_cache = False
 
         if should_read_cache:
             cache_idx = batch_cache_idx[seq_idx]
@@ -360,158 +363,6 @@ def hpu_causal_conv1d_fn(
     return out.to(original_dtype)
 
 
-"""  working version with cpu indexing works with cuda compile
-lm_eval --model vllm --model_args pretrained=ibm-granite/granite-4.0-h-small,enforce_eager=False --tasks gsm8k --batch_size auto
-
- 1319/1319 [05:12<00:00,  4.23it/s] time to first sample output 28.3sec
-[2025-11-30 16:28:28] INFO evaluation_tracker.py:280: Output path not provided, skipping saving results aggregated
-vllm (pretrained=ibm-granite/granite-4.0-h-small,enforce_eager=False), gen_kwargs: (None), limit: None, num_fewshot: None, batch_size: auto
-|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
-|-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
-|gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.8514|±  |0.0098|
-|     |       |strict-match    |     5|exact_match|↑  |0.8514|±  |0.0098|
-
-lm_eval --model vllm --model_args pretrained=ibm-granite/granite-4.0-h-small,enforce_eager=False --tasks gsm8k --batch_size auto
-
-1319/1319 [04:42<00:00,  4.67it/s] time to first sample output 28.3sec
-[2025-11-30 16:59:59] INFO evaluation_tracker.py:280: Output path not provided, skipping saving results aggregated
-vllm (pretrained=ibm-granite/granite-4.0-h-small,enforce_eager=False), gen_kwargs: (None), limit: None, num_fewshot: None, batch_size: auto
-|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
-|-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
-|gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.8514|±  |0.0098|
-|     |       |strict-match    |     5|exact_match|↑  |0.8514|±  |0.0098|
-
-
-lm_eval --model vllm --model_args pretrained=ibm-granite/granite-4.0-h-small,enforce_eager=True --tasks gsm8k --batch_size auto
-1319/1319 [04:36<00:00,  4.77it/s]
-[2025-11-30 17:13:41] INFO evaluation_tracker.py:280: Output path not provided, skipping saving results aggregated
-vllm (pretrained=ibm-granite/granite-4.0-h-small,enforce_eager=True), gen_kwargs: (None), limit: None, num_fewshot: None, batch_size: auto
-|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
-|-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
-|gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.8491|±  |0.0099|
-|     |       |strict-match    |     5|exact_match|↑  |0.8484|±  |0.0099|
-
-
-def hpu_causal_conv1d_fn(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    conv_states: torch.Tensor | None,
-    query_start_loc: torch.Tensor,
-    cache_indices: torch.Tensor | None = None,
-    has_initial_state: torch.Tensor | None = None,
-    activation: str | None = "silu",
-    pad_slot_id: int = PAD_SLOT_ID,
-    block_idx_first_scheduled_token: torch.Tensor | None = None,
-    block_idx_last_scheduled_token: torch.Tensor | None = None,
-    initial_state_idx: torch.Tensor | None = None,
-    num_computed_tokens: torch.Tensor | None = None,
-    block_size_to_align: int = 0,
-    metadata=None,
-    validate_data: bool = False,
-):
-    if any(
-        ptr is not None
-        for ptr in (
-            block_idx_first_scheduled_token,
-            block_idx_last_scheduled_token,
-            initial_state_idx,
-            num_computed_tokens,
-        )
-    ):
-        raise NotImplementedError("Prefix caching metadata is not supported in the PyTorch reference implementation.")
-    
-    activation = _normalize_activation(activation)
-    original_dtype = x.dtype
-    work_dtype = conv_states.dtype if conv_states is not None else x.dtype
-    x_work = x.to(work_dtype)
-    weight_work = weight.to(work_dtype)
-    bias_work = bias.to(work_dtype) if bias is not None else None
-
-    if conv_states is not None and conv_states.device != x_work.device:
-        raise ValueError("'conv_states' must reside on the same device as 'x'.")
-
-    # CRITICAL FIX: Move query_start_loc to CPU and convert to list BEFORE any operations
-    # This prevents .item() calls during CUDA graph capture
-    qsl = _ensure_query_start_loc(query_start_loc)
-    assert qsl is not None
-    
-    # Convert to Python list immediately to avoid .item() during graph capture
-    # Note: qsl should already be on CPU from _flatten_inputs_for_update or _ensure_query_start_loc
-    qsl_list = qsl.cpu().tolist() if qsl.device.type != "cpu" else qsl.tolist()
-    padded_batch = len(qsl_list) - 1
-
-    dim, cu_seqlen = x_work.shape
-    _, width = weight_work.shape
-    state_len = max(width - 1, 0)
-
-    if validate_data:
-        if x_work.dim() != 2:
-            raise ValueError("'x' must be 2-D (dim, cu_seq_len).")
-        if weight_work.shape != (dim, width):
-            raise ValueError("'weight' must have shape (dim, width).")
-        if bias_work is not None and bias_work.shape != (dim,):
-            raise ValueError("'bias' must match the feature dimension.")
-        if not ((x_work.stride(0) == 1) or (x_work.stride(1) == 1)):
-            raise ValueError("Input tensor must be in channel-last or channel-first memory layout.")
-        if cache_indices is not None and cache_indices.numel() != padded_batch:
-            raise ValueError("'cache_indices' must align with the batch dimension implied by 'query_start_loc'.")
-        if has_initial_state is not None and has_initial_state.numel() != padded_batch:
-            raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
-
-    weight_dw = _make_depthwise_weight(weight_work)
-
-    # CRITICAL FIX: Convert all tensors to Python lists to avoid .item() during graph capture
-    cache_indices_list = None
-    if cache_indices is not None:
-        cache_indices_list = cache_indices.cpu().tolist() if cache_indices.device.type != "cpu" else cache_indices.tolist()
-    
-    has_initial_state_list = None
-    if has_initial_state is not None:
-        has_initial_state_list = has_initial_state.cpu().tolist() if has_initial_state.device.type != "cpu" else has_initial_state.tolist()
-
-    out = torch.empty_like(x_work)
-
-    # Pre-compute all sequence boundaries using the list (no .item() calls)
-    seq_boundaries = [(qsl_list[i], qsl_list[i + 1]) for i in range(padded_batch)]
-
-    for seq_idx in range(padded_batch):
-        seq_start, seq_end = seq_boundaries[seq_idx]
-        if seq_start == seq_end:
-            continue
-
-        seq_x = x_work[:, seq_start:seq_end].contiguous()
-        init_state, cache_idx = _gather_initial_state(
-            seq_idx,
-            dim,
-            state_len,
-            conv_states,
-            cache_indices_list,  # Pass list instead of tensor
-            has_initial_state_list,  # Pass list instead of tensor
-            pad_slot_id,
-            x_work.device,
-            work_dtype,
-        )
-
-        if state_len > 0:
-            seq_input = torch.cat([init_state, seq_x], dim=1)
-        else:
-            seq_input = seq_x
-
-        seq_input = seq_input.unsqueeze(0)
-        seq_out = F.conv1d(seq_input, weight_dw, bias=bias_work, groups=dim)
-        seq_out = _apply_activation(seq_out, activation)
-        out[:, seq_start:seq_end] = seq_out.squeeze(0)
-
-        if conv_states is not None and cache_idx is not None and state_len > 0:
-            # Update cache with the latest state_len tokens for this sequence.
-            new_state = torch.cat([init_state, seq_x], dim=1)[:, -state_len:]
-            with torch.no_grad():
-                conv_states[cache_idx, :, -state_len:].copy_(new_state)
-    
-    return out.to(original_dtype)
-"""
-
 def hpu_causal_conv1d_update(
     x: torch.Tensor,
     conv_state: torch.Tensor,
@@ -527,21 +378,6 @@ def hpu_causal_conv1d_update(
     initial_state_idx: torch.Tensor | None = None,
     validate_data: bool = False,
 ):
-    import os
-    if os.environ.get("VLLM_SAVE_PT", "0") == "1":
-        torch.save({'x': x,
-                    'conv_state': conv_state,
-                    'weight': weight,
-                    'bias' :bias,
-                    'activation': activation,
-                    'conv_state_indices': conv_state_indices,
-                    'num_accepted_tokens': num_accepted_tokens,
-                    'query_start_loc': query_start_loc,
-                    'max_query_len': max_query_len,
-                    'pad_slot_id': pad_slot_id,
-                    'block_idx_last_scheduled_token': block_idx_last_scheduled_token,
-                    'initial_state_idx': initial_state_idx,
-                    'validate_data': validate_data}, "causal_conv1d_update_input_cpu.pt")
     if num_accepted_tokens is not None:
         raise NotImplementedError("Speculative decoding updates are not supported in the reference implementation.")
     if block_idx_last_scheduled_token is not None or initial_state_idx is not None:
