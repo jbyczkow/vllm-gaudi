@@ -716,7 +716,7 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'state_indices_tensor',
         'query_start_loc',
         'query_start_loc_p',
-        'additional_data'
+        'padding_mask_flat'
     ])
     return attention_metadata
 
@@ -2080,16 +2080,25 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         # compute prefix caching block indices - DONE
 
-        # Pack Mamba metadata: [is_prompt, num_prefills, num_decodes, num_prefill_tokens, num_decode_tokens]
-        num_prefill_reqs = len(contents.req_ids)
-        total_prefill_tokens = sum(query_lens)  # This is already set earlier
+        # CREATE PADDING MASK HERE using target_bs and target_seq
+        # Create mask on CPU: [target_bs, target_seq]
+        padding_mask_cpu = torch.zeros(
+            target_bs,
+            target_seq,
+            dtype=self.dtype,
+            device='cpu',
+            pin_memory=self.pin_memory
+        )
 
-        additional_data = torch.tensor([
-            num_prefill_reqs,      # num_prefills
-            0,                     # num_decodes
-            total_prefill_tokens,  # num_prefill_tokens
-            0                      # num_decode_tokens
-        ], dtype=torch.int32, device='cpu', pin_memory=self.pin_memory)
+        # Mark real tokens as True
+        # query_lens has actual lengths (before padding)
+        # contents.req_ids has actual number of requests (before padding)
+        for i in range(len(contents.req_ids)):
+            actual_len = query_lens[i]
+            padding_mask_cpu[i, :actual_len] = 1.0
+
+        # Flatten to [target_bs * target_seq, 1] for easy multiplication
+        padding_mask_flat_cpu = padding_mask_cpu.view(-1, 1)
 
         query_lens = async_h2d_copy(query_lens, dtype=torch.int32)
         token_ids = async_h2d_copy(token_ids, dtype=torch.int32)
@@ -2113,6 +2122,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         block_idx_last_scheduled_token_p = async_h2d_copy(block_idx_last_scheduled_token_cpu, dtype=torch.int32)
         query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
+        padding_mask_flat = async_h2d_copy(padding_mask_flat_cpu, device=self.device)
+
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(seq_lens_tensor=query_lens,
                                                                      context_lens_tensor=context_lens,
                                                                      slot_mapping=token_slots,
@@ -2130,7 +2141,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                      block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
                                                                      block_idx_last_scheduled_token_p=block_idx_last_scheduled_token_p,
                                                                      query_start_loc=query_start_loc_p,
-                                                                     additional_data=additional_data)
+                                                                     padding_mask_flat=padding_mask_flat)
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -2413,17 +2424,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             dim=0
         )
 
-
-        # Pack Mamba metadata: [is_prompt, num_prefills, num_decodes, num_prefill_tokens, num_decode_tokens]
-        total_decode_tokens = sum(num_scheduled_tokens[:num_decodes])
-
-        additional_data = torch.tensor([
-            0,                   # num_prefills
-            num_decodes,         # num_decodes
-            0,                   # num_prefill_tokens
-            total_decode_tokens  # num_decode_tokens
-        ], dtype=torch.int32, device='cpu', pin_memory=self.pin_memory)
-
         # CPU<>HPU sync *should not* happen here.
         block_list_device = async_h2d_copy(block_list, device=self.device)
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
@@ -2486,7 +2486,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                    window_block_groups=window_block_groups_device,
                                    state_indices_tensor=state_indices_tensor,
                                    seq_lens_tensor=seq_lens_tensor,
-                                   additional_data=additional_data,
                                    query_start_loc=query_start_loc_p,
                                ),
                                spec_decode_metadata=spec_decode_metadata)
