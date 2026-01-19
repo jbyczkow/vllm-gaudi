@@ -492,22 +492,10 @@ class HPUMambaMixer2(MambaMixer2):
         has_prefill = attn_metadata.is_prompt
         has_decode = not attn_metadata.is_prompt
 
-        if prefix_caching_enabled:
-            # If prefix caching is enabled, retrieve the relevant variables
-            # for prefill and decode
-            block_idx_last_computed_token = attn_metadata.block_idx_last_computed_token
-            block_idx_last_scheduled_token = attn_metadata.block_idx_last_scheduled_token
-
-            # Prefill-only variables:
-            block_idx_first_scheduled_token_p = (
-                attn_metadata.block_idx_first_scheduled_token_p
-            )
-            num_computed_tokens_p = attn_metadata.num_computed_tokens_p
-        else:
-            block_idx_last_computed_token = None
-            block_idx_last_scheduled_token = None
-            block_idx_first_scheduled_token_p = None
-            num_computed_tokens_p = None
+        block_idx_last_computed_token = None
+        block_idx_last_scheduled_token = None
+        block_idx_first_scheduled_token_p = None
+        num_computed_tokens_p = None
 
         # Process prefill requests
         if has_prefill:
@@ -592,103 +580,10 @@ class HPUMambaMixer2(MambaMixer2):
             )
             output = output * padding_mask_flat.view(output.shape[0], 1)
 
-            if prefix_caching_enabled:
-                # The chunk_stride is the number of chunks per mamba block
-                # e.g., if mamba_block_size = 512 and chunk_size = 256,
-                # then chunk_stride = 2
-                chunk_stride = mamba_block_size // chunk_size
-
-                # Save state for sequences with more than just final state
-                for seq_idx in range(num_prefills):
-                    # Block index for the first scheduled token
-                    block_idx_first_scheduled_token = block_idx_first_scheduled_token_p[
-                        seq_idx
-                    ]
-
-                    # Block index for the last scheduled token
-                    block_idx_last_scheduled_token = block_idx_last_computed_token[
-                        seq_idx
-                    ]
-
-                    # Number of blocks that need to be written
-                    n_blocks_to_fill = (
-                        block_idx_last_scheduled_token - block_idx_first_scheduled_token
-                    )
-
-                    # Skip sequences that don't have any blocks to fill
-                    if n_blocks_to_fill == 0:
-                        continue
-
-                    # Look up the state indices
-                    cache_blocks_to_fill = state_indices_tensor[
-                        seq_idx,
-                        block_idx_first_scheduled_token:block_idx_last_scheduled_token,
-                    ]
-
-                    # First chunk index for this sequence
-                    if seq_idx == 0:
-                        first_chunk = 0
-                    else:
-                        first_chunk = 1 + last_chunk_indices_p[seq_idx - 1]
-
-                    # First chunk that is aligned on the mamba block boundary
-                    first_aligned_chunk = first_chunk + chunk_stride - 1
-
-                    # Calculate the number of computed tokens that were not
-                    # already cached
-                    num_unaligned_computed_tokens = (
-                        num_computed_tokens_p[seq_idx] % mamba_block_size
-                    )
-
-                    if num_unaligned_computed_tokens > 0:
-                        # If the number of computed tokens is not block aligned,
-                        # then we need to shift the index accordingly
-                        first_aligned_chunk -= (
-                            num_unaligned_computed_tokens // chunk_size
-                        )
-
-                    # Get states to write
-                    from_where = varlen_states[
-                        first_aligned_chunk : first_aligned_chunk
-                        + n_blocks_to_fill * chunk_stride : chunk_stride
-                    ]
-
-                    # Write the states
-                    ssm_state[cache_blocks_to_fill] = from_where
-
-                # For all seqs, store the last state (note: might be partial):
-                ssm_state[
-                    state_indices_tensor.gather(
-                        1, block_idx_last_computed_token.unsqueeze(1)
-                    ).squeeze(1)
-                ] = varlen_states[last_chunk_indices_p]
-
-            else:
-                # update ssm states
-                # - varlen state is a (num_prefills, nheads, headdim, dstate)
-                #   tensor
-                ssm_state[state_indices_tensor] = varlen_states
+            ssm_state[state_indices_tensor] = varlen_states
 
         # Process decode requests
         if has_decode:
-            if prefix_caching_enabled:
-                state_indices_tensor_d_input = state_indices_tensor.gather(
-                    1, block_idx_last_computed_token.unsqueeze(1)
-                ).squeeze(1)
-                state_indices_tensor_d_output = state_indices_tensor.gather(
-                    1, block_idx_last_computed_token.unsqueeze(1)
-                ).squeeze(1)
-                # for decode:
-                #   block_idx_first_scheduled_token_d ==
-                #       block_idx_last_computed_token
-                # at block boundaries:
-                #   block_idx_first_scheduled_token_d >
-                #       block_idx_last_computed_token
-            else:
-                # Without caching, read and write in-place to the same blocks:
-                state_indices_tensor_d_input = state_indices_tensor
-                state_indices_tensor_d_output = state_indices_tensor
-
             # 2. Convolution sequence transformation
             hidden_states_B_C = hpu_causal_conv1d_update(
                 hidden_states_B_C,
@@ -739,7 +634,7 @@ class HPUMambaMixer2(MambaMixer2):
                 z=None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
-                state_batch_indices=state_indices_tensor_d_input,
-                dst_state_batch_indices=state_indices_tensor_d_output,
+                state_batch_indices=state_indices_tensor,
+                dst_state_batch_indices=state_indices_tensor,
                 out=output.view(output.shape[0], -1, self.head_dim),
             )
