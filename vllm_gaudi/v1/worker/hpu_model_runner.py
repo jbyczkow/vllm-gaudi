@@ -597,9 +597,6 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'cu_chunk_seqlen_p',
         'last_chunk_indices_p',
         'num_computed_tokens_p',
-        'block_idx_last_computed_token_p',
-        'block_idx_first_scheduled_token_p',
-        'block_idx_last_scheduled_token_p',
         'state_indices_tensor',
         'state_indices_tensor_mamba',
         'query_start_loc',
@@ -1951,10 +1948,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         cu_chunk_seqlen.append(seqlen_pos)
 
-        #nums_dict, batch_ptr, token_chunk_offset_ptr = (
-        #    compute_causal_conv1d_metadata(query_start_loc_p)
-        #)
-
         num_reqs = len(self.input_batch.req_ids)
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
 
@@ -1984,21 +1977,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # TODO: check if self.block_size will be the same as self.kv_cache_spec.block_size, at least for mamba only model
         mamba_block_size = self.block_size
         # Block index of the last computed token
-        block_idx_last_computed_token_cpu = cdiv(num_computed_tokens_cpu, mamba_block_size) - 1
-        # -1 in case it's non-computed and causes later issues with indexing
-        # TODO: is this clamping needed here?
-        block_idx_last_computed_token_cpu = block_idx_last_computed_token_cpu.clamp(min=0)
-
-        # which is <= block index for the first scheduled token
-        block_idx_first_scheduled_token_cpu = (
-            cdiv(num_computed_tokens_cpu + 1, mamba_block_size) - 1
-        )
-        # which is <= block index of the last scheduled token
-        block_idx_last_scheduled_token_cpu = (
-            cdiv(torch.tensor(query_lens, dtype=torch.int32, device='cpu'), mamba_block_size) - 1
-        )
-
-        # compute prefix caching block indices - DONE
 
         # CREATE PADDING MASK HERE using target_bs and target_seq
         # Create mask on CPU: [target_bs, target_seq]
@@ -2038,9 +2016,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         last_chunk_indices_p = async_h2d_copy(last_chunk_indices, dtype=torch.int32)
 
         num_computed_tokens_p = async_h2d_copy(num_computed_tokens_cpu, dtype=torch.int32)
-        block_idx_last_computed_token_p = async_h2d_copy(block_idx_last_computed_token_cpu, dtype=torch.int32)
-        block_idx_first_scheduled_token_p = async_h2d_copy(block_idx_first_scheduled_token_cpu, dtype=torch.int32)
-        block_idx_last_scheduled_token_p = async_h2d_copy(block_idx_last_scheduled_token_cpu, dtype=torch.int32)
         query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
         padding_mask_flat = async_h2d_copy(padding_mask_flat_cpu, device=self.device)
@@ -2059,9 +2034,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                      state_indices_tensor=state_indices_tensor,
                                                                      state_indices_tensor_mamba=state_indices_tensor_mamba,
                                                                      num_computed_tokens_p=num_computed_tokens_p,
-                                                                     block_idx_last_computed_token_p=block_idx_last_computed_token_p,
-                                                                     block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
-                                                                     block_idx_last_scheduled_token_p=block_idx_last_scheduled_token_p,
                                                                      query_start_loc=query_start_loc_p_cpu,
                                                                      padding_mask_flat=padding_mask_flat)
         return PrefillInputData(request_ids=[req_ids],
