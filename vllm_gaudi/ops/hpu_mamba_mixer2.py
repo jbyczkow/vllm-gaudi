@@ -401,7 +401,36 @@ class HPUMambaMixer2(MambaMixer2):
         hidden_states: torch.Tensor,
         mup_vector: torch.Tensor | None = None,
     ):
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+        htorch.core.mark_step()
+
+        # 0. covert from [batch, seq_len, features] to [total_tokens, features] (varlen) format
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        seq_lens_tensor = attn_metadata.seq_lens_tensor  # or wherever it's stored
+
+        batch_size, max_seq_len, features = hidden_states.shape
+        total_tokens = seq_lens_tensor.sum().item()
+
+        additional_data = attn_metadata.additional_data
+        num_decodes = int(additional_data[2].item())
+        num_prefill_tokens = int(additional_data[3].item())
+        num_actual_tokens = num_prefill_tokens + num_decodes
+        assert num_actual_tokens == total_tokens, (
+            f"num_actual_tokens ({num_actual_tokens}) != total_tokens ({total_tokens})"
+        )
+
+        # Create index mapping once
+        batch_indices = torch.repeat_interleave(
+            torch.arange(batch_size, device=hidden_states.device),
+            seq_lens_tensor
+        )
+        token_indices = torch.cat([
+            torch.arange(seq_len, device=hidden_states.device)
+            for seq_len in seq_lens_tensor
+        ])
+
+        # Convert to varlen (remove padding)
+        hidden_states = hidden_states[batch_indices, token_indices, :]
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
@@ -435,14 +464,18 @@ class HPUMambaMixer2(MambaMixer2):
         hidden_states_varlen = self.norm(ssm_output, gate)
 
         # 5. Final linear projection
-        output, _ = self.out_proj(hidden_states_varlen)
+        output_varlen, _ = self.out_proj(hidden_states_varlen)
 
-        if get_forward_context().attn_metadata.is_prompt:
-            output = output.view(1, output.shape[0], output.shape[1])
-        else:
-            output = output.view(output.shape[0], 1, output.shape[1])
+        # Convert back to batched (re-insert padding)
+        output_batched = torch.zeros(
+            batch_size, max_seq_len, output_varlen.shape[-1],
+            dtype=output_varlen.dtype,
+            device=output_varlen.device
+        )
+        output_batched[batch_indices, token_indices, :] = output_varlen
 
-        return output
+        htorch.core.mark_step()
+        return output_batched
 
     def conv_ssm_forward(
         self,
