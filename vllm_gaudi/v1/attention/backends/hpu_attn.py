@@ -53,9 +53,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     query_start_loc_p: Optional[torch.Tensor] = None
 
     num_computed_tokens_p: Optional[torch.Tensor] = None
-    block_idx_last_computed_token_p: Optional[torch.Tensor] = None
-    block_idx_first_scheduled_token_p: Optional[torch.Tensor] = None
-    block_idx_last_scheduled_token_p: Optional[torch.Tensor] = None
 
     padding_mask_flat: Optional[torch.Tensor] = None
 
@@ -75,17 +72,14 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                               seq_lens_tensor,
                               slot_mapping,
                               block_size,
-                              prep_initial_states,
-                              has_initial_states_p,
-                              seq_idx_p,
-                              cu_chunk_seqlen_p,
-                              last_chunk_indices_p,
-                              state_indices_tensor,
+                              prep_initial_states=None,
+                              has_initial_states_p=None,
+                              seq_idx_p=None,
+                              cu_chunk_seqlen_p=None,
+                              last_chunk_indices_p=None,
+                              state_indices_tensor=None,
                               state_indices_tensor_mamba=None,
                               num_computed_tokens_p=None,
-                              block_idx_last_computed_token_p=None,
-                              block_idx_first_scheduled_token_p=None,
-                              block_idx_last_scheduled_token_p=None,
                               query_start_loc=None,
                               padding_mask_flat=None):
         return cls(is_prompt=True,
@@ -108,9 +102,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    state_indices_tensor=state_indices_tensor,
                    state_indices_tensor_mamba=state_indices_tensor_mamba,
                    num_computed_tokens_p=num_computed_tokens_p,
-                   block_idx_last_computed_token_p=block_idx_last_computed_token_p,
-                   block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
-                   block_idx_last_scheduled_token_p=block_idx_last_scheduled_token_p,
                    query_start_loc=query_start_loc,
                    query_start_loc_p=query_start_loc,
                    padding_mask_flat=padding_mask_flat)
@@ -129,7 +120,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              chunked_block_list,
                              chunked_block_usage,
                              chunked_block_groups,
-                             state_indices_tensor,
+                             state_indices_tensor=None,
                              state_indices_tensor_mamba=None,
                              query_start_loc=None,
                              seq_lens_tensor=None):

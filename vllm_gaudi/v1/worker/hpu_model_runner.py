@@ -1971,6 +1971,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         if len(contents.req_ids) == 0:
             return PrefillInputData()
 
+        num_mamba_layers = self.model_config.get_num_layers_by_block_type(
+            self.parallel_config, "mamba"
+        )
+
         token_ids = contents.token_ids
         req_ids = contents.req_ids
         query_lens = [len(tids) for tids in contents.token_ids]
@@ -2050,129 +2054,154 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         logits_indices = pad_list(logits_indices, round_up(len(logits_indices), self.logits_rounding),
                                   itertools.repeat(-1))
 
-        # COMPUTE query_start_loc (similar to GPU)
-        # This is a cumulative sum of query lengths
-        query_start_loc_p_cpu = torch.zeros(
-            len(query_lens) + 1,
-            dtype=torch.int32,
-            device='cpu',
-            pin_memory=self.pin_memory
-        )
-        query_start_loc_p_cpu[1:] = torch.cumsum(
-            torch.tensor(query_lens, dtype=torch.int32),
-            dim=0
-        )
-
-        num_computed_tokens_p_cpu = torch.zeros(len(contents.req_ids), dtype=torch.int32)
-
-        for i, req_id in enumerate(contents.req_ids):
-            req_idx = self.input_batch.req_id_to_index[req_id]
-            # Get num_computed_tokens for this specific request
-            num_computed_tokens_p_cpu[i] = self.input_batch.num_computed_tokens_cpu[req_idx]
-
-        has_initial_states_cpu = num_computed_tokens_p_cpu > 0
-        # Print types and shapes
-        prep_initial_states = torch.any(has_initial_states_cpu)
-
-        # The code below carefully constructs the chunks such that:
-        # 1. Chunks contain tokens from a *single* sequence only.
-        # 2. For every sequence, we are guaranteed that we can
-        #    retrieve the mamba state *every* chunk_size tokens.
-        # Constraint (1) dramatically simplifies the mamba2 kernels.
-        # Constraint (2) dramatically simplifies the implementation
-        # of prefix caching for mamba2 (wip). We need to take care
-        # of the interaction with chunked prefill in order to
-        # satisfy constraint (2).
-        # TODO (tdoublep): This code could probably be optimized.
-        cu_chunk_seqlen = []
-        seq_idx = []
-        last_chunk_indices = []
-        seqlen_pos = 0
-        chunk_size = self.model_config.get_mamba_chunk_size()
-        for req_idx in range(len(contents.req_ids)):
-            this_num_computed = num_computed_tokens_p_cpu[req_idx].item()
-            this_new_tokens = (
-                query_start_loc_p_cpu[req_idx + 1].item()
-                - query_start_loc_p_cpu[req_idx].item()
-            )
-
-            # if computed tokens are not chunk-aligned, use the first
-            # chunk to finish it off
-            if this_num_computed % chunk_size != 0:
-                seq_idx.append(req_idx)
-                cu_chunk_seqlen.append(seqlen_pos)
-                # how many tokens to finish the chunk?
-                chunk_len = (
-                    cdiv(this_num_computed, chunk_size) * chunk_size
-                    - this_num_computed
-                )
-                # we can only use at most this_new_tokens
-                chunk_len = min(chunk_len, this_new_tokens)
-                seqlen_pos += chunk_len
-                this_new_tokens -= chunk_len
-
-            n_chunks = cdiv(this_new_tokens, chunk_size)
-            for chunk in range(n_chunks):
-                seq_idx.append(req_idx)
-                cu_chunk_seqlen.append(seqlen_pos)
-                chunk_len = min(chunk_size, this_new_tokens)
-                seqlen_pos += chunk_len
-                this_new_tokens -= chunk_len
-
-            assert this_new_tokens == 0
-            last_chunk_indices.append(len(cu_chunk_seqlen) - 1)
-
-        cu_chunk_seqlen.append(seqlen_pos)
-
-        num_reqs = len(self.input_batch.req_ids)
-        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
-
-        block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
-
-        num_prefill_reqs = len(contents.req_ids)
-        state_indices_cpu = torch.zeros(num_prefill_reqs, dtype=torch.int32)
-
-        for i, req_id in enumerate(contents.req_ids):
-            req_idx = self.input_batch.req_id_to_index[req_id]
-            # Get the first block for this request (same logic as decode)
-            first_block = block_table_cpu_tensor[req_idx, 0]
-            state_indices_cpu[i] = first_block
-
-        if num_prefill_reqs < target_bs:
-            padding = torch.full(
-                (target_bs - num_prefill_reqs,),
-                self._PAD_BLOCK_ID,
+        if num_mamba_layers > 0:
+            # COMPUTE query_start_loc (similar to GPU)
+            # This is a cumulative sum of query lengths
+            query_start_loc_p_cpu = torch.zeros(
+                len(query_lens) + 1,
                 dtype=torch.int32,
-                device='cpu'
+                device='cpu',
+                pin_memory=self.pin_memory
             )
-            state_indices_cpu = torch.cat([state_indices_cpu, padding])
+            query_start_loc_p_cpu[1:] = torch.cumsum(
+                torch.tensor(query_lens, dtype=torch.int32),
+                dim=0
+            )
 
-        state_indices_cpu_mamba = state_indices_cpu.clone()
-        state_indices_cpu_mamba[state_indices_cpu_mamba == self._PAD_BLOCK_ID] = -1
+            num_computed_tokens_p_cpu = torch.zeros(len(contents.req_ids), dtype=torch.int32)
 
-        # TODO: check if self.block_size will be the same as self.kv_cache_spec.block_size, at least for mamba only model
-        mamba_block_size = self.block_size
-        # Block index of the last computed token
+            for i, req_id in enumerate(contents.req_ids):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                # Get num_computed_tokens for this specific request
+                num_computed_tokens_p_cpu[i] = self.input_batch.num_computed_tokens_cpu[req_idx]
 
-        # CREATE PADDING MASK HERE using target_bs and target_seq
-        # Create mask on CPU: [target_bs, target_seq]
-        padding_mask_cpu = torch.zeros(
-            target_bs,
-            target_seq,
-            dtype=self.dtype,
-            device='cpu',
-            pin_memory=self.pin_memory
-        )
+            has_initial_states_cpu = num_computed_tokens_p_cpu > 0
+            # Print types and shapes
+            prep_initial_states = torch.any(has_initial_states_cpu)
 
-        # Mark real tokens as True
-        # query_lens has actual lengths (before padding)
-        # contents.req_ids has actual number of requests (before padding)
-        for i in range(len(contents.req_ids)):
-            actual_len = query_lens[i]
-            padding_mask_cpu[i, :actual_len] = 1.0
+            # The code below carefully constructs the chunks such that:
+            # 1. Chunks contain tokens from a *single* sequence only.
+            # 2. For every sequence, we are guaranteed that we can
+            #    retrieve the mamba state *every* chunk_size tokens.
+            # Constraint (1) dramatically simplifies the mamba2 kernels.
+            # Constraint (2) dramatically simplifies the implementation
+            # of prefix caching for mamba2 (wip). We need to take care
+            # of the interaction with chunked prefill in order to
+            # satisfy constraint (2).
+            # TODO (tdoublep): This code could probably be optimized.
+            cu_chunk_seqlen = []
+            seq_idx = []
+            last_chunk_indices = []
+            seqlen_pos = 0
+            chunk_size = self.model_config.get_mamba_chunk_size()
+            for req_idx in range(len(contents.req_ids)):
+                this_num_computed = num_computed_tokens_p_cpu[req_idx].item()
+                this_new_tokens = (
+                    query_start_loc_p_cpu[req_idx + 1].item()
+                    - query_start_loc_p_cpu[req_idx].item()
+                )
 
-        # Flatten to [target_bs * target_seq, 1] for easy multiplication
-        padding_mask_flat_cpu = padding_mask_cpu.view(-1, 1)
+                # if computed tokens are not chunk-aligned, use the first
+                # chunk to finish it off
+                if this_num_computed % chunk_size != 0:
+                    seq_idx.append(req_idx)
+                    cu_chunk_seqlen.append(seqlen_pos)
+                    # how many tokens to finish the chunk?
+                    chunk_len = (
+                        cdiv(this_num_computed, chunk_size) * chunk_size
+                        - this_num_computed
+                    )
+                    # we can only use at most this_new_tokens
+                    chunk_len = min(chunk_len, this_new_tokens)
+                    seqlen_pos += chunk_len
+                    this_new_tokens -= chunk_len
+
+                n_chunks = cdiv(this_new_tokens, chunk_size)
+                for chunk in range(n_chunks):
+                    seq_idx.append(req_idx)
+                    cu_chunk_seqlen.append(seqlen_pos)
+                    chunk_len = min(chunk_size, this_new_tokens)
+                    seqlen_pos += chunk_len
+                    this_new_tokens -= chunk_len
+
+                assert this_new_tokens == 0
+                last_chunk_indices.append(len(cu_chunk_seqlen) - 1)
+
+            cu_chunk_seqlen.append(seqlen_pos)
+
+            num_reqs = len(self.input_batch.req_ids)
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
+
+            block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
+
+            num_prefill_reqs = len(contents.req_ids)
+            state_indices_cpu = torch.zeros(num_prefill_reqs, dtype=torch.int32)
+
+            for i, req_id in enumerate(contents.req_ids):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                # Get the first block for this request (same logic as decode)
+                first_block = block_table_cpu_tensor[req_idx, 0]
+                state_indices_cpu[i] = first_block
+
+            if num_prefill_reqs < target_bs:
+                padding = torch.full(
+                    (target_bs - num_prefill_reqs,),
+                    self._PAD_BLOCK_ID,
+                    dtype=torch.int32,
+                    device='cpu'
+                )
+                state_indices_cpu = torch.cat([state_indices_cpu, padding])
+
+            state_indices_cpu_mamba = state_indices_cpu.clone()
+            state_indices_cpu_mamba[state_indices_cpu_mamba == self._PAD_BLOCK_ID] = -1
+
+            # TODO: check if self.block_size will be the same as self.kv_cache_spec.block_size, at least for mamba only model
+            mamba_block_size = self.block_size
+            # Block index of the last computed token
+
+            # CREATE PADDING MASK HERE using target_bs and target_seq
+            # Create mask on CPU: [target_bs, target_seq]
+            padding_mask_cpu = torch.zeros(
+                target_bs,
+                target_seq,
+                dtype=self.dtype,
+                device='cpu',
+                pin_memory=self.pin_memory
+            )
+
+            # Mark real tokens as True
+            # query_lens has actual lengths (before padding)
+            # contents.req_ids has actual number of requests (before padding)
+            for i in range(len(contents.req_ids)):
+                actual_len = query_lens[i]
+                padding_mask_cpu[i, :actual_len] = 1.0
+
+            # Flatten to [target_bs * target_seq, 1] for easy multiplication
+            padding_mask_flat_cpu = padding_mask_cpu.view(-1, 1)
+
+            state_indices_tensor = async_h2d_copy(state_indices_cpu, device=self.device)
+            state_indices_tensor_mamba = async_h2d_copy(state_indices_cpu_mamba, device=self.device)
+
+            has_initial_states_p = async_h2d_copy(has_initial_states_cpu, dtype=torch.int32)
+            seq_idx_p = async_h2d_copy(seq_idx, dtype=torch.int32)
+            cu_chunk_seqlen_p = async_h2d_copy(cu_chunk_seqlen, dtype=torch.int32)
+            last_chunk_indices_p = async_h2d_copy(last_chunk_indices, dtype=torch.int32)
+
+            num_computed_tokens_p = async_h2d_copy(num_computed_tokens_cpu, dtype=torch.int32)
+            query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
+
+            padding_mask_flat = async_h2d_copy(padding_mask_flat_cpu, device=self.device)
+
+        else:
+            state_indices_tensor = None
+            state_indices_tensor_mamba = None
+            has_initial_states_p = None
+            seq_idx_p = None
+            cu_chunk_seqlen_p = None
+            last_chunk_indices_p = None
+            num_computed_tokens_p = None
+            query_start_loc_p = None
+            padding_mask_flat = None
 
         query_lens = async_h2d_copy(query_lens, dtype=torch.int32)
         token_ids = async_h2d_copy(token_ids, dtype=torch.int32)
@@ -2182,19 +2211,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         context_lens = async_h2d_copy(context_lens, dtype=torch.int32)
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if has_context else None
-        state_indices_tensor = async_h2d_copy(state_indices_cpu, device=self.device)
-        state_indices_tensor_mamba = async_h2d_copy(state_indices_cpu_mamba, device=self.device)
-
-        #TODO: what (if any) of this data applies to decode
-        has_initial_states_p = async_h2d_copy(has_initial_states_cpu, dtype=torch.int32)
-        seq_idx_p = async_h2d_copy(seq_idx, dtype=torch.int32)
-        cu_chunk_seqlen_p = async_h2d_copy(cu_chunk_seqlen, dtype=torch.int32)
-        last_chunk_indices_p = async_h2d_copy(last_chunk_indices, dtype=torch.int32)
-
-        num_computed_tokens_p = async_h2d_copy(num_computed_tokens_cpu, dtype=torch.int32)
-        query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
-
-        padding_mask_flat = async_h2d_copy(padding_mask_flat_cpu, device=self.device)
 
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(seq_lens_tensor=query_lens,
                                                                      context_lens_tensor=context_lens,
@@ -2310,6 +2326,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                   context_lens,
                                   block_table_cpu_tensor,
                                   scheduler_output=None) -> DecodeInputData:
+
+        num_mamba_layers = self.model_config.get_num_layers_by_block_type(
+            self.parallel_config, "mamba"
+        )
 
         # NOTE(kzawora): the +1 is what causes this entire thing to work,
         # as in the paged attention, we don't fetch just the context from cache,
@@ -2477,38 +2497,48 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 self.get_habana_paged_attn_buffers(
                     block_tables_chunk, slot_mapping.tolist(),
                     padded_batch_size * num_tokens)
-    
-        state_indices_cpu = block_table_cpu_tensor[:num_decodes, 0].clone()
-        if num_decodes < padded_batch_size:
-            padding = torch.full(
-                (padded_batch_size - num_decodes,),
-                self._PAD_BLOCK_ID,
+
+        if num_mamba_layers > 0:
+            state_indices_cpu = block_table_cpu_tensor[:num_decodes, 0].clone()
+            if num_decodes < padded_batch_size:
+                padding = torch.full(
+                    (padded_batch_size - num_decodes,),
+                    self._PAD_BLOCK_ID,
+                    dtype=torch.int32,
+                    device='cpu'
+                )
+                state_indices_cpu = torch.cat([state_indices_cpu, padding])
+
+            state_indices_cpu_mamba = state_indices_cpu.clone()
+            state_indices_cpu_mamba[state_indices_cpu_mamba == self._PAD_BLOCK_ID] = -1
+
+            seq_lens_cpu = torch.tensor(
+                num_tokens_per_req,
                 dtype=torch.int32,
-                device='cpu'
+                device='cpu',
+                pin_memory=self.pin_memory
             )
-            state_indices_cpu = torch.cat([state_indices_cpu, padding])
+            seq_lens_tensor = async_h2d_copy(seq_lens_cpu, device=self.device)
 
-        state_indices_cpu_mamba = state_indices_cpu.clone()
-        state_indices_cpu_mamba[state_indices_cpu_mamba == self._PAD_BLOCK_ID] = -1
+            query_start_loc_p_cpu = torch.zeros(
+                len(seq_lens_cpu) + 1,
+                dtype=torch.int32,
+                device='cpu',
+                pin_memory=self.pin_memory
+            )
+            query_start_loc_p_cpu[1:] = torch.cumsum(
+                seq_lens_cpu.clone().to(dtype=torch.int32),
+                dim=0
+            )
 
-        seq_lens_cpu = torch.tensor(
-            num_tokens_per_req,
-            dtype=torch.int32,
-            device='cpu',
-            pin_memory=self.pin_memory
-        )
-        seq_lens_tensor = async_h2d_copy(seq_lens_cpu, device=self.device)
+            state_indices_tensor = async_h2d_copy(state_indices_cpu, device=self.device)
+            state_indices_tensor_mamba = async_h2d_copy(state_indices_cpu_mamba, device=self.device)
+            query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
-        query_start_loc_p_cpu = torch.zeros(
-            len(seq_lens_cpu) + 1,
-            dtype=torch.int32,
-            device='cpu',
-            pin_memory=self.pin_memory
-        )
-        query_start_loc_p_cpu[1:] = torch.cumsum(
-            seq_lens_cpu.clone().to(dtype=torch.int32),
-            dim=0
-        )
+        else:
+            state_indices_tensor = None
+            state_indices_tensor_mamba = None
+            query_start_loc_p = None
 
         # CPU<>HPU sync *should not* happen here.
         block_list_device = async_h2d_copy(block_list, device=self.device)
@@ -2559,9 +2589,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             spec_decode_metadata = None
         logits_indices_device = async_h2d_copy(logits_indices, device=self.device)
-        state_indices_tensor = async_h2d_copy(state_indices_cpu, device=self.device)
-        state_indices_tensor_mamba = async_h2d_copy(state_indices_cpu_mamba, device=self.device)
-        query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
         attn_metadata = HPUAttentionMetadataV1.make_decode_metadata(
             block_list=block_list_device,
