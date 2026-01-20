@@ -180,7 +180,6 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     state_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
     state_indices_tensor_mamba: Optional[torch.Tensor] = None  # shape: [batch,]
 
-
 @dataclass
 class HPUMLAMetadata(HPUAttentionMetadata, AttentionMetadata):
     pass
