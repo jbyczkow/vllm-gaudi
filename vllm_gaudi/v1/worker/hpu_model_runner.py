@@ -5289,7 +5289,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             tensor = torch.zeros(
-                kv_cache_tensor.size, dtype=torch.int8, device=self.device # handle + 1
+                kv_cache_tensor.size + 2, dtype=torch.int8, device=self.device # handle + 1
             )
             for layer_name in kv_cache_tensor.shared_by:
                 kv_caches[layer_name] = tensor
@@ -5308,7 +5308,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 num_blocks = \
                     kv_cache_tensor_size // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, FullAttentionSpec):
-                    kc, vc = kv_caches[layer_name].view(kv_cache_spec.dtype).reshape(2, num_blocks * kv_cache_spec.block_size, #(num_blocks + 1) * kv_cache_spec.block_size,
+                    kc, vc = kv_caches[layer_name].view(kv_cache_spec.dtype).reshape(2, (num_blocks + 1) * kv_cache_spec.block_size,
                                                                             kv_cache_spec.num_kv_heads,
                                                                             kv_cache_spec.head_size).unbind() # (key cache, val cache)
                     kv_caches[layer_name] = (kc, vc, None, None)
@@ -5321,7 +5321,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         num_element_per_page = (
                             kv_cache_spec.page_size_bytes // dtype_size
                         )
-                        target_shape = (num_blocks, *shape) # (num_blocks + 1, *shape)
+                        target_shape = (num_blocks + 1, *shape)
                         stride = torch.empty(target_shape).stride()
                         target_stride = (num_element_per_page, *stride[1:])
                         assert storage_offset_bytes % dtype_size == 0
