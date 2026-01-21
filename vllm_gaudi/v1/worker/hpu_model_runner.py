@@ -5288,9 +5288,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         print("Start\n")
 
 
+        kv_cache_dtype=torch.bfloat16 # TODO: get from random spec, assuming that all are the same
+
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            num_elements = kv_cache_tensor.size // torch.tensor([], dtype=kv_cache_dtype).element_size()
             tensor = torch.zeros(
-                kv_cache_tensor.size, dtype=torch.bfloat16, device=self.device # handle + 1
+                num_elements, dtype=kv_cache_dtype, device=self.device # handle + 1
             )
             for layer_name in kv_cache_tensor.shared_by:
                 kv_caches[layer_name] = tensor
@@ -5321,7 +5324,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         num_element_per_page = (
                             kv_cache_spec.page_size_bytes // dtype_size
                         )
-                        target_shape = (num_blocks + 1, *shape)
+                        target_shape = (num_blocks, *shape)
                         stride = torch.empty(target_shape).stride()
                         target_stride = (num_element_per_page, *stride[1:])
                         assert storage_offset_bytes % dtype_size == 0
