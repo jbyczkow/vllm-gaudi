@@ -5287,13 +5287,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         print(torch.hpu.mem_get_info()[0])
         print("Start\n")
 
-
-        kv_cache_dtype=torch.bfloat16 # TODO: get from random spec, assuming that all are the same
-
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            num_elements = kv_cache_tensor.size // torch.tensor([], dtype=kv_cache_dtype).element_size()
             tensor = torch.zeros(
-                num_elements, dtype=kv_cache_dtype, device=self.device # handle + 1
+                kv_cache_tensor.size, dtype=torch.int8, device=self.device # handle + 1
             )
             for layer_name in kv_cache_tensor.shared_by:
                 kv_caches[layer_name] = tensor
@@ -5312,9 +5308,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 num_blocks = \
                     kv_cache_tensor_size // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, FullAttentionSpec):
-                    kc, vc = kv_caches[layer_name].view(kv_cache_spec.dtype).reshape(2, num_blocks * kv_cache_spec.block_size, # handle + 1; na razie nieistotne
+                    kc, vc = kv_caches[layer_name].view(kv_cache_spec.dtype).reshape(2, num_blocks * kv_cache_spec.block_size, #(num_blocks + 1) * kv_cache_spec.block_size,
                                                                             kv_cache_spec.num_kv_heads,
-                                                                            kv_cache_spec.head_size).unbind() # (key, val)
+                                                                            kv_cache_spec.head_size).unbind() # (key cache, val cache)
                     kv_caches[layer_name] = (kc, vc, None, None)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_caches[layer_name]
@@ -5325,7 +5321,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         num_element_per_page = (
                             kv_cache_spec.page_size_bytes // dtype_size
                         )
-                        target_shape = (num_blocks, *shape)
+                        target_shape = (num_blocks, *shape) # (num_blocks + 1, *shape)
                         stride = torch.empty(target_shape).stride()
                         target_stride = (num_element_per_page, *stride[1:])
                         assert storage_offset_bytes % dtype_size == 0
