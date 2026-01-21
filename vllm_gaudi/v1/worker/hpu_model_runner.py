@@ -788,7 +788,6 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'cu_chunk_seqlen_p',
         'last_chunk_indices_p',
         'state_indices_tensor',
-        'state_indices_tensor_mamba',
         'query_start_loc',
         'query_start_loc_p',
         'padding_mask_flat'
@@ -2151,8 +2150,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 )
                 state_indices_cpu = torch.cat([state_indices_cpu, padding])
 
-            state_indices_cpu_mamba = state_indices_cpu.clone()
-            state_indices_cpu_mamba[state_indices_cpu_mamba == self._PAD_BLOCK_ID] = -1
+            state_indices_cpu[state_indices_cpu == self._PAD_BLOCK_ID] = -1
 
             # TODO: check if self.block_size will be the same as self.kv_cache_spec.block_size, at least for mamba only model
             mamba_block_size = self.block_size
@@ -2179,7 +2177,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             padding_mask_flat_cpu = padding_mask_cpu.view(-1, 1)
 
             state_indices_tensor = async_h2d_copy(state_indices_cpu, device=self.device)
-            state_indices_tensor_mamba = async_h2d_copy(state_indices_cpu_mamba, device=self.device)
 
             has_initial_states_p = async_h2d_copy(has_initial_states_cpu, dtype=torch.int32)
             seq_idx_p = async_h2d_copy(seq_idx, dtype=torch.int32)
@@ -2192,7 +2189,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         else:
             state_indices_tensor = None
-            state_indices_tensor_mamba = None
             has_initial_states_p = None
             seq_idx_p = None
             cu_chunk_seqlen_p = None
@@ -2221,7 +2217,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                      cu_chunk_seqlen_p=cu_chunk_seqlen_p,
                                                                      last_chunk_indices_p=last_chunk_indices_p,
                                                                      state_indices_tensor=state_indices_tensor,
-                                                                     state_indices_tensor_mamba=state_indices_tensor_mamba,
                                                                      query_start_loc=query_start_loc_p_cpu,
                                                                      padding_mask_flat=padding_mask_flat)
         return PrefillInputData(request_ids=[req_ids],
@@ -2505,8 +2500,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 )
                 state_indices_cpu = torch.cat([state_indices_cpu, padding])
 
-            state_indices_cpu_mamba = state_indices_cpu.clone()
-            state_indices_cpu_mamba[state_indices_cpu_mamba == self._PAD_BLOCK_ID] = -1
+            state_indices_cpu[state_indices_cpu == self._PAD_BLOCK_ID] = -1
 
             seq_lens_cpu = torch.tensor(
                 num_tokens_per_req,
@@ -2528,12 +2522,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             )
 
             state_indices_tensor = async_h2d_copy(state_indices_cpu, device=self.device)
-            state_indices_tensor_mamba = async_h2d_copy(state_indices_cpu_mamba, device=self.device)
             query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
         else:
             state_indices_tensor = None
-            state_indices_tensor_mamba = None
             query_start_loc_p = None
 
         # CPU<>HPU sync *should not* happen here.
