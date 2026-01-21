@@ -5312,9 +5312,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 num_blocks = \
                     kv_cache_tensor_size // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, FullAttentionSpec):
-                    kv_caches[layer_name] = kv_caches[layer_name].view(kv_cache_spec.dtype).reshape(2, num_blocks * kv_cache_spec.block_size, # handle + 1; na razie nieistotne
+                    kc, vc = kv_caches[layer_name].view(kv_cache_spec.dtype).reshape(2, num_blocks * kv_cache_spec.block_size, # handle + 1; na razie nieistotne
                                                                             kv_cache_spec.num_kv_heads,
-                                                                            kv_cache_spec.head_size).unbind()
+                                                                            kv_cache_spec.head_size).unbind() # (key, val)
+                    kv_caches[layer_name] = (kc, vc, None, None)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_caches[layer_name]
                     state_tensors = []
@@ -5336,6 +5337,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         )
                         state_tensors.append(tensor)
                         storage_offset_bytes += stride[0] * dtype_size
+                    # state_tensors.append(None)
+                    # state_tensors.append(None)
                     kv_caches[layer_name] = tuple(state_tensors) # to jest zle ale - kv_caches[layer_name]..view(kv_cache_spec.shapes)
                 else:
                     pass
