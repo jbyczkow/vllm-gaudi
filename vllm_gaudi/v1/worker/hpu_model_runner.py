@@ -399,7 +399,12 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self.unified_attn_persistent_ctx = None
         self.flatten_input = get_config().flatten_input
         self.is_mm_optimized = is_mm_optimized(self.model)
-        self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
+        self.sliding_window = vllm_config.model_config.get_sliding_window()
+        self.interleaved_sliding_window = (
+            is_interleaved(vllm_config.model_config.hf_text_config)
+            and self.sliding_window is not None
+            and self.sliding_window > 0
+        )
         self.metadata_processor = HPUAttentionMetadataProcessor(vllm_config)
 
         # for DP
@@ -670,7 +675,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.is_pooling_model = model_config.pooler_config is not None
 
         self.sliding_window = model_config.get_sliding_window()
-        self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
+        self.interleaved_sliding_window = (
+            is_interleaved(vllm_config.model_config.hf_text_config)
+            and self.sliding_window is not None
+            and self.sliding_window > 0
+        )
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
@@ -5833,7 +5842,11 @@ class HPUAttentionMetadataProcessor:
         self.block_size = vllm_config.cache_config.block_size
         self.dtype = vllm_config.model_config.dtype
         self.sliding_window = vllm_config.model_config.get_sliding_window()
-        self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
+        self.interleaved_sliding_window = (
+            is_interleaved(vllm_config.model_config.hf_text_config)
+            and self.sliding_window is not None
+            and self.sliding_window > 0
+        )
 
         if self.interleaved_sliding_window:
             self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
