@@ -544,10 +544,6 @@ class HPUMambaMixer2(MambaMixer2):
             initial_states = None
             if has_initial_states_p is not None and prep_initial_states:
                 kernel_ssm_indices = state_indices_tensor
-                if prefix_caching_enabled:
-                    kernel_ssm_indices = state_indices_tensor.gather(
-                        1, block_idx_last_computed_token.unsqueeze(1)
-                    ).squeeze(1)
                 initial_states = torch.where(
                     has_initial_states_p[:, None, None, None],
                     ssm_state[kernel_ssm_indices],
