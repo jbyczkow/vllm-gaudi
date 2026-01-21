@@ -76,7 +76,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                               cu_chunk_seqlen_p=None,
                               last_chunk_indices_p=None,
                               state_indices_tensor=None,
-                              state_indices_tensor_mamba=None,
                               query_start_loc=None,
                               padding_mask_flat=None):
         return cls(is_prompt=True,
@@ -97,7 +96,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    cu_chunk_seqlen_p=cu_chunk_seqlen_p,
                    last_chunk_indices_p=last_chunk_indices_p,
                    state_indices_tensor=state_indices_tensor,
-                   state_indices_tensor_mamba=state_indices_tensor_mamba,
                    query_start_loc=query_start_loc,
                    query_start_loc_p=query_start_loc,
                    padding_mask_flat=padding_mask_flat)
@@ -114,7 +112,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              window_block_usage,
                              window_block_groups,
                              state_indices_tensor=None,
-                             state_indices_tensor_mamba=None,
                              query_start_loc=None,
                              seq_lens_tensor=None):
         return cls(is_prompt=False,
@@ -134,6 +131,5 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    block_size=block_size,
                    prep_initial_states=None,
                    state_indices_tensor=state_indices_tensor,
-                   state_indices_tensor_mamba=state_indices_tensor_mamba,
                    query_start_loc=query_start_loc,
                    query_start_loc_p=query_start_loc)

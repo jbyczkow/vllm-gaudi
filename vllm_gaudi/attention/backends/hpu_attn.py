@@ -178,7 +178,6 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     cu_chunk_seqlen_p: Optional[torch.Tensor] = None
     last_chunk_indices_p: Optional[torch.Tensor] = None
     state_indices_tensor: Optional[torch.Tensor] = None  # shape: [batch,]
-    state_indices_tensor_mamba: Optional[torch.Tensor] = None  # shape: [batch,]
 
 @dataclass
 class HPUMLAMetadata(HPUAttentionMetadata, AttentionMetadata):
