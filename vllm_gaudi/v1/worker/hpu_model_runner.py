@@ -787,7 +787,6 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'seq_idx_p',
         'cu_chunk_seqlen_p',
         'last_chunk_indices_p',
-        'num_computed_tokens_p',
         'state_indices_tensor',
         'state_indices_tensor_mamba',
         'query_start_loc',
@@ -2187,7 +2186,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             cu_chunk_seqlen_p = async_h2d_copy(cu_chunk_seqlen, dtype=torch.int32)
             last_chunk_indices_p = async_h2d_copy(last_chunk_indices, dtype=torch.int32)
 
-            num_computed_tokens_p = async_h2d_copy(num_computed_tokens_cpu, dtype=torch.int32)
             query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
             padding_mask_flat = async_h2d_copy(padding_mask_flat_cpu, device=self.device)
@@ -2199,7 +2197,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             seq_idx_p = None
             cu_chunk_seqlen_p = None
             last_chunk_indices_p = None
-            num_computed_tokens_p = None
             query_start_loc_p = None
             padding_mask_flat = None
 
@@ -2225,7 +2222,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                      last_chunk_indices_p=last_chunk_indices_p,
                                                                      state_indices_tensor=state_indices_tensor,
                                                                      state_indices_tensor_mamba=state_indices_tensor_mamba,
-                                                                     num_computed_tokens_p=num_computed_tokens_p,
                                                                      query_start_loc=query_start_loc_p_cpu,
                                                                      padding_mask_flat=padding_mask_flat)
         return PrefillInputData(request_ids=[req_ids],

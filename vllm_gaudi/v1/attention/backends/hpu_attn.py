@@ -52,8 +52,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     query_start_loc: Optional[torch.Tensor] = None
     query_start_loc_p: Optional[torch.Tensor] = None
 
-    num_computed_tokens_p: Optional[torch.Tensor] = None
-
     padding_mask_flat: Optional[torch.Tensor] = None
 
     def seq_len(self):
@@ -79,7 +77,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                               last_chunk_indices_p=None,
                               state_indices_tensor=None,
                               state_indices_tensor_mamba=None,
-                              num_computed_tokens_p=None,
                               query_start_loc=None,
                               padding_mask_flat=None):
         return cls(is_prompt=True,
@@ -101,7 +98,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    last_chunk_indices_p=last_chunk_indices_p,
                    state_indices_tensor=state_indices_tensor,
                    state_indices_tensor_mamba=state_indices_tensor_mamba,
-                   num_computed_tokens_p=num_computed_tokens_p,
                    query_start_loc=query_start_loc,
                    query_start_loc_p=query_start_loc,
                    padding_mask_flat=padding_mask_flat)
