@@ -1985,8 +1985,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
             state_indices_cpu[state_indices_cpu == self._PAD_BLOCK_ID] = -1
 
-            # TODO: check if self.block_size will be the same as self.kv_cache_spec.block_size, at least for mamba only model
-            mamba_block_size = self.block_size
             # Block index of the last computed token
 
             # CREATE PADDING MASK HERE using target_bs and target_seq
