@@ -2405,7 +2405,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                    window_block_usage=window_block_usage_device,
                                    window_block_groups=window_block_groups_device,
                                    state_indices_tensor=state_indices_tensor,
-                                   state_indices_tensor_mamba=state_indices_tensor_mamba,
                                    seq_lens_tensor=seq_lens_tensor,
                                    query_start_loc=query_start_loc_p_cpu,
                                ),
