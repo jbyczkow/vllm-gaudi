@@ -10,12 +10,12 @@ import torch
 from einops import rearrange
 from packaging import version
 
-from .ops_selector import (
-    get_bmm_chunk_impl,
-    get_chunk_cumsum_impl,
-    get_chunk_state_impl,
-    get_ssd_scan_impl,
-    get_ssd_state_passing_impl,
+from .pytorch_implementation import (
+    new_chunk_cumsum,
+    new_chunk_scan,
+    new_chunk_state,
+    new_ssd_bmm,
+    new_ssd_state_passing
 )
 
 
@@ -89,12 +89,10 @@ def _mamba_chunk_scan_combined_fwd(
 
     # 1. Compute chunked cumsum of A * dt
     # - here dt may go through a softplus activation
-    _chunk_cumsum_fwd = get_chunk_cumsum_impl()
-    dA_cumsum, dt = _chunk_cumsum_fwd(
+    dA_cumsum, dt = new_chunk_cumsum(
         dt,
         A,
         chunk_size,
-        cu_chunk_seqlens,
         dt_bias=dt_bias,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
@@ -102,9 +100,8 @@ def _mamba_chunk_scan_combined_fwd(
 
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
-    _chunk_state_fwd = get_chunk_state_impl()
-    states = _chunk_state_fwd(
-        B, x, dt, dA_cumsum, cu_chunk_seqlens, states_in_fp32=True
+    states = new_chunk_state(
+        B, x, dt, dA_cumsum, states_in_fp32=True
     )
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
@@ -113,22 +110,18 @@ def _mamba_chunk_scan_combined_fwd(
     #   ii) seq_idx to be all specified.
     # - When a new seq_idx is detected, we will stop passing the prev_state
     #   and switch accordingly to the init_state corresponding to the new seq_idx.
-    _state_passing_fwd = get_ssd_state_passing_impl()
-    states = _state_passing_fwd(
+    states = new_ssd_state_passing(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum,  # (nheads, nchunks, chunk_size)
-        cu_chunk_seqlens,
         initial_states=rearrange(initial_states, "... p n -> ... (p n)")
         if initial_states is not None
         else None,  # (batch, nheads, headdim*dstate)
-        seq_idx=seq_idx,
         out_dtype=state_dtype if state_dtype is not None else C.dtype,
     )
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
-    _bmm_chunk_fwd = get_bmm_chunk_impl()
-    CB = _bmm_chunk_fwd(C, B, chunk_size, cu_chunk_seqlens, output_dtype=torch.float32)
+    CB = new_ssd_bmm(C, B, chunk_size, output_dtype=torch.float32)
 
     # 5. Scan and compute the diagonal blocks, taking into
     #    account past causal states.
@@ -140,17 +133,14 @@ def _mamba_chunk_scan_combined_fwd(
     # - in each (pseudo) chunk, we detect if the previous (pseudo) chunk had
     #   a seq_idx change, in which case we take states information from
     #   init_states.
-    _chunk_scan_fwd = get_ssd_scan_impl()
-    _chunk_scan_fwd(
+    new_chunk_scan(
         CB,
         x,
         dt,
         dA_cumsum,
         C,
         states,
-        cu_chunk_seqlens,
         out,  # in-place update
-        seq_idx,
         D=D,
         z=z,
         initial_states=initial_states,
