@@ -5273,7 +5273,64 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_sizes = {}
+        torch.hpu.synchronize()
+        print(torch.hpu.mem_get_info()[0])
+        print("Start\n")
+
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            tensor = torch.zeros(
+                kv_cache_tensor.size + kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes, dtype=torch.int8, device=self.device # handle + 1 block
+            )
+            for layer_name in kv_cache_tensor.shared_by:
+                kv_caches[layer_name] = tensor
+
+            torch.hpu.synchronize()
+            print(f"kv_cache_tensor.size: {kv_cache_tensor.size}")
+            print(f"tyle zostalo: {torch.hpu.mem_get_info()[0]}")
+
+        for group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = group.kv_cache_spec
+            for layer_name in group.layer_names:
+                kv_cache_spec = group.kv_cache_spec
+                for kk in kv_cache_config.kv_cache_tensors:
+                    if layer_name in kk.shared_by:
+                        kv_cache_tensor_size = kk.size
+                        break
+                num_blocks = \
+                    kv_cache_tensor_size // kv_cache_spec.page_size_bytes
+                if isinstance(kv_cache_spec, FullAttentionSpec):
+                    kc, vc = kv_caches[layer_name].view(kv_cache_spec.dtype).reshape(2, (num_blocks + 1) * kv_cache_spec.block_size,
+                                                                            kv_cache_spec.num_kv_heads,
+                                                                            kv_cache_spec.head_size).unbind() # (key cache, val cache)
+                    kv_caches[layer_name] = (kc, vc, None, None) # we keep key and value scales None
+                elif isinstance(kv_cache_spec, MambaSpec):
+                    raw_tensor = kv_caches[layer_name]
+                    state_tensors = []
+                    storage_offset_bytes = 0
+                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                        dtype_size = get_dtype_size(dtype)
+                        num_element_per_page = (
+                            kv_cache_spec.page_size_bytes // dtype_size
+                        )
+                        target_shape = (num_blocks + 1, *shape)
+                        stride = torch.empty(target_shape).stride()
+                        target_stride = (num_element_per_page, *stride[1:])
+                        assert storage_offset_bytes % dtype_size == 0
+                        tensor = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=target_shape,
+                            stride=target_stride,
+                            storage_offset=storage_offset_bytes // dtype_size,
+                        )
+                        state_tensors.append(tensor)
+                        storage_offset_bytes += stride[0] * dtype_size
+                    # state_tensors.append(None)
+                    # state_tensors.append(None)
+                    kv_caches[layer_name] = tuple(state_tensors) # to jest zle ale - kv_caches[layer_name]..view(kv_cache_spec.shapes)
+                else:
+                    pass
+
+        for kv_cache_tensor in []:#kv_cache_config.kv_cache_tensors:
             for layer_name in kv_cache_tensor.shared_by:
                 # Get the correct spec for this layer
                 kv_cache_spec = None
