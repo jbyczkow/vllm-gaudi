@@ -5289,12 +5289,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             tensor = torch.zeros(
-                kv_cache_tensor.size + 2 * kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes, dtype=torch.int8, device=self.device # handle + 1
+                kv_cache_tensor.size + kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes, dtype=torch.int8, device=self.device # handle + 1 block
             )
             for layer_name in kv_cache_tensor.shared_by:
                 kv_caches[layer_name] = tensor
 
             torch.hpu.synchronize()
+            print(f"kv_cache_tensor.size: {kv_cache_tensor.size}")
             print(f"tyle zostalo: {torch.hpu.mem_get_info()[0]}")
 
         for group in kv_cache_config.kv_cache_groups:
@@ -5311,7 +5312,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     kc, vc = kv_caches[layer_name].view(kv_cache_spec.dtype).reshape(2, (num_blocks + 1) * kv_cache_spec.block_size,
                                                                             kv_cache_spec.num_kv_heads,
                                                                             kv_cache_spec.head_size).unbind() # (key cache, val cache)
-                    kv_caches[layer_name] = (kc, vc, None, None)
+                    kv_caches[layer_name] = (kc, vc, None, None) # we keep key and value scales None
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_caches[layer_name]
                     state_tensors = []
