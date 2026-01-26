@@ -197,30 +197,25 @@ def hpu_causal_conv1d_fn(
     # Create tensor to get all data from 0 to lest sequence
     # This works bor padded_batch equal 1
     # ss = torch.arange(seq_starts[0], seq_ends[-1])
-    seq_x = x_work[:, qsl[0]:qsl[-1]]
+    seq_x = x_work[:, :]
 
     # Get init_state for all batch
-    # if  is_prompt:
-    #     init_state = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
-    #     init_state = init_state.squeeze()
-    # else:
-    #     init_state = conv_states[batch_cache_idx, :, -state_len:]
-    #     init_state = init_state.squeeze()
-    init_state = torch.where(torch.tensor([is_prompt], device=x_work.device),
-                             torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype),
-                             conv_states[batch_cache_idx, :, -state_len:])
+    if  is_prompt:
+        init_state = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
+    else:
+        init_state = conv_states[batch_cache_idx, :, -state_len:]
+    # init_state = torch.where(torch.tensor([is_prompt], device=x_work.device), torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype), conv_states[batch_cache_idx, :, -state_len:])
     init_state = init_state.squeeze()
 
     # Prepare input for convolution
     seq_input = torch.cat([init_state, seq_x], dim=1)
-    new_state = seq_input[:, -state_len:]
+    new_state = seq_input[:, qsl[-1]:qsl[-1]+state_len]
 
     # Apply convolution
     seq_input = seq_input.unsqueeze(0)
     seq_out = F.conv1d(seq_input, weight_dw, bias=bias_work, groups=dim)
     seq_out = _apply_activation(seq_out, activation)
-    # out[:, ss] = seq_out.squeeze(0)
-    out[:, qsl[0]:qsl[-1]] = seq_out.squeeze(0)
+    out[:, :] = seq_out.squeeze(0)
 
     # Update conv state
     # Update cache with the latest state_len tokens for this sequence
