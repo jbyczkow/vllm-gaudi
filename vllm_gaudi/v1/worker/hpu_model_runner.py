@@ -1716,11 +1716,19 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         return target_bs <= self.max_prefill_batch_size and\
             target_bs * target_seq <= self.max_num_tokens
 
+    def _get_attention_grup_id_for_hybrid(self):
+        if len(self.kv_cache_config.kv_cache_groups) = 1:
+            return 0
+
+        for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            if isinstance(group.kv_cache_spec, AttentionSpec):
+                return gid
+
     def _extract_prefill_batch_contents(self, num_prefills, num_decodes, num_scheduled_tokens, warmup=False):
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
         num_reqs = num_prefills + num_decodes
-        block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
+        block_table_cpu_tensor = self.input_batch.block_table[self._get_attention_grup_id_for_hybrid()].get_cpu_tensor()
         all_batch_contents = [BatchContents()]
 
         for batch_idx in range(num_decodes, num_reqs):
@@ -1937,7 +1945,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 assert this_new_tokens == 0
                 last_chunk_indices.append(last_chunk_index)
 
-            block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
+            block_table_cpu_tensor = self.input_batch.block_table[self._get_attention_grup_id_for_hybrid()].get_cpu_tensor()
 
             num_prefill_reqs = len(contents.req_ids)
             state_indices_cpu = torch.zeros(num_prefill_reqs, dtype=torch.int32)
@@ -2373,7 +2381,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             return DecodeInputData(num_decodes=0), None
         return self._create_decode_input_data(num_decodes, num_scheduled_tokens,
                                               self.input_batch.num_computed_tokens_cpu[:num_decodes],
-                                              self.input_batch.block_table[0].get_cpu_tensor(), scheduler_output), None
+                                              self.input_batch.block_table[self._get_attention_grup_id_for_hybrid()].get_cpu_tensor(), scheduler_output), None
 
     def _create_dummy_decode_input_data(self) -> DecodeInputData:
         # create dummy decode input data with batch size 1
