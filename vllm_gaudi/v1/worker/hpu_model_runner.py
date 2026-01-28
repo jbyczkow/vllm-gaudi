@@ -838,7 +838,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # turned on since it's not captured and causes issues
             envs.VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION = True
 
-        self.logits_rounding = 1
+        self.logits_rounding
         # High-level profiler
         self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
@@ -1717,7 +1717,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             target_bs * target_seq <= self.max_num_tokens
 
     def _get_attention_grup_id_for_hybrid(self):
-        if len(self.kv_cache_config.kv_cache_groups) = 1:
+        if len(self.kv_cache_config.kv_cache_groups) == 0:
             return 0
 
         for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
