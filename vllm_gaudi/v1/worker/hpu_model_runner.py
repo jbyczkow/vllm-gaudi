@@ -1717,7 +1717,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             target_bs * target_seq <= self.max_num_tokens
 
     def _get_attention_grup_id_for_hybrid(self):
-        if len(self.kv_cache_config.kv_cache_groups) == 0:
+        if len(self.kv_cache_config.kv_cache_groups) < 1:
             return 0
 
         for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
