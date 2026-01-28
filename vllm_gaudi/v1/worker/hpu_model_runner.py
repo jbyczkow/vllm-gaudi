@@ -838,7 +838,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # turned on since it's not captured and causes issues
             envs.VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION = True
 
-        self.logits_rounding
+        self.logits_rounding = 1
         # High-level profiler
         self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
