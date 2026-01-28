@@ -770,6 +770,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
         # Persistent batch.
+
         self.input_batch = InputBatch(
             max_num_reqs=self.scheduler_config.max_num_seqs,
             max_model_len=self.max_model_len,
@@ -1945,7 +1946,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 assert this_new_tokens == 0
                 last_chunk_indices.append(last_chunk_index)
 
-            block_table_cpu_tensor = self.input_batch.block_table[self._get_attention_grup_id_for_hybrid()].get_cpu_tensor()
+            block_table_cpu_tensor = self.input_batch.block_table[
+                self._get_attention_grup_id_for_hybrid()].get_cpu_tensor()
 
             num_prefill_reqs = len(contents.req_ids)
             state_indices_cpu = torch.zeros(num_prefill_reqs, dtype=torch.int32)
@@ -2379,9 +2381,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 dummy_decode_input_data = self._create_dummy_decode_input_data()
                 return DecodeInputData(num_decodes=0), dummy_decode_input_data
             return DecodeInputData(num_decodes=0), None
-        return self._create_decode_input_data(num_decodes, num_scheduled_tokens,
-                                              self.input_batch.num_computed_tokens_cpu[:num_decodes],
-                                              self.input_batch.block_table[self._get_attention_grup_id_for_hybrid()].get_cpu_tensor(), scheduler_output), None
+        return self._create_decode_input_data(
+            num_decodes, num_scheduled_tokens, self.input_batch.num_computed_tokens_cpu[:num_decodes],
+            self.input_batch.block_table[self._get_attention_grup_id_for_hybrid()].get_cpu_tensor(),
+            scheduler_output), None
 
     def _create_dummy_decode_input_data(self) -> DecodeInputData:
         # create dummy decode input data with batch size 1
@@ -4894,7 +4897,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             else:
                 max_bucket = max(self.bucketing_manager.decode_buckets[-1][0],
                                  self.bucketing_manager.prompt_buckets[-1][0])
-            if max_bucket > self.input_batch.max_num_reqs:
+            if not self.num_mamba_layers and max_bucket > self.input_batch.max_num_reqs:
                 input_batch_bkp = self.input_batch
                 self.input_batch = InputBatch(
                     max_num_reqs=self.bucketing_manager.decode_buckets[-1][0],
@@ -4996,8 +4999,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         logger.info(msg)
         self.profiler.end()
 
-        if not (self.unified_attn or self.is_pooling_model) and \
-            max_bucket > self.input_batch.max_num_reqs:
+        if not (self.num_mamba_layers or self.unified_attn or self.is_pooling_model) \
+             and max_bucket > self.input_batch.max_num_reqs:
             self.input_batch = input_batch_bkp
         # NOTE(kzawora): This is a nasty workaround - for whatever cache_utils-related reason,
         # reusing defragmenter used in warmup causes accuracy drops, which is why we re-create
