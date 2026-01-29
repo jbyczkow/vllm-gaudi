@@ -407,14 +407,11 @@ class HPUMambaMixer2(MambaMixer2):
             hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(hidden_states_B_C)
 
             # 3. State Space Model sequence transformation
-            initial_states = None
-            if has_initial_states_p is not None and prep_initial_states:
-                kernel_ssm_indices = state_indices_tensor
-                initial_states = torch.where(
-                    has_initial_states_p[:, None, None, None],
-                    ssm_state[kernel_ssm_indices],
-                    0,
-                )
+            initial_states = torch.zeros_like(ssm_state[state_indices_tensor])
+            if has_initial_states_p is not None:
+                initial_states = torch.where(prep_initial_states,
+                                             torch.where(has_initial_states_p[:, None, None, None], ssm_state[state_indices_tensor], 0,),
+                                             initial_states)
 
             # NOTE: final output is an in-place update of out tensor
             varlen_states = hpu_mamba_chunk_scan_combined_varlen(
