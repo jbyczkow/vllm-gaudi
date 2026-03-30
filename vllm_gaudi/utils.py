@@ -4,6 +4,7 @@ from vllm.config import ModelConfig
 import vllm.utils.torch_utils as torch_utils
 from vllm_gaudi.extension.runtime import get_config
 import vllm.v1.core.sched.async_scheduler as _async_sched_module
+import vllm.v1.metrics.stats as _stats_module
 from vllm_gaudi.v1.core.sched.hpu_async_scheduler import HPUAsyncScheduler
 from typing import (Any, Optional, TypeVar, Union)
 import torch
@@ -330,3 +331,16 @@ class HPUCompileConfig:
 
 
 _async_sched_module.AsyncScheduler = HPUAsyncScheduler
+
+# Guard Prometheus counters against negative prompt-token counts that can arise
+# when KV-cache blocks are invalidated during OOM and token-count bookkeeping
+# becomes temporarily inconsistent.  Prometheus counters require non-negative
+# increments; clamping here prevents a crash in PrometheusStatLogger.record().
+_stats_get_by_source_orig = _stats_module.PromptTokenStats.get_by_source
+
+
+def _hpu_get_by_source(self, source: str) -> int:
+    return max(0, _stats_get_by_source_orig(self, source))
+
+
+_stats_module.PromptTokenStats.get_by_source = _hpu_get_by_source
