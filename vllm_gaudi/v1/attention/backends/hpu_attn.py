@@ -37,7 +37,9 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
     def get_supported_kernel_block_sizes() -> list[Union[int, MultipleOf]]:
         # for mamba models we don't split block size across kernels
         # kernel_block_sizes in InputBatch are the same as block_sizes
-        return [128]
+        # WA: accept any block size (including hybrid 528) so upstream
+        # select_common_block_size does not reject non-128-aligned sizes
+        return [MultipleOf(1)]
 
 
 @dataclass
