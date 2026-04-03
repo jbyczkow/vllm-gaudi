@@ -120,14 +120,16 @@ class HpuPlatform(Platform):
             aligned_block_size = ((original_block_size + 127) // 128) * 128
             if aligned_block_size != original_block_size:
                 logger.warning(
-                    "Padding hybrid cache block_size from %d to %d to satisfy "
-                    "Gaudi 128-token kernel alignment.",
+                    "[WA] Skipping hybrid block_size padding from %d to %d "
+                    "to avoid SDPA graph compile failure.",
                     original_block_size,
                     aligned_block_size,
                 )
-                cache_config.block_size = aligned_block_size
-                if cache_config.mamba_cache_mode == "align":
-                    cache_config.mamba_block_size = aligned_block_size
+                # WA: Do NOT pad block_size to 128-aligned for hybrid models
+                # The upstream 528 block_size works with Synapse SDPA compiler
+                # cache_config.block_size = aligned_block_size
+                # if cache_config.mamba_cache_mode == "align":
+                #     cache_config.mamba_block_size = aligned_block_size
 
             # Recompute mamba_page_size_padded so it is a multiple of
             # the HPU attention page size.
