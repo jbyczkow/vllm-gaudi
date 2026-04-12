@@ -2878,10 +2878,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             req_indices = list(range(num_decodes))
             if self.use_prefix_caching:
-                load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_computed_token_cpu,
-                                                                       padded_batch_size)
-                store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu,
-                                                                        padded_batch_size)
+                if os.environ.get('VLLM_PC_FORCE_ZERO_DECODE_BLOCKS', '0') == '1':
+                    # EXPERIMENT: force decode to use block 0 (like PC-off)
+                    # to isolate scattered block access overhead
+                    zeros = [0] * len(req_indices)
+                    load_state_indices_cpu = store_state_indices_cpu = \
+                        self.prepare_mamba_state_idxs(req_indices, zeros, padded_batch_size)
+                else:
+                    load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices,
+                                                                           block_idx_last_computed_token_cpu,
+                                                                           padded_batch_size)
+                    store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices,
+                                                                            block_idx_last_scheduled_token_cpu,
+                                                                            padded_batch_size)
             else:
                 zeros = [0] * len(req_indices)
                 load_state_indices_cpu = store_state_indices_cpu = \
