@@ -4092,7 +4092,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                pd_info.decode_req_ids, False)
             self.event_start = self.profiler.get_timestamp_us()
             self.profiler.start("internal", "decode")
+            _decode_instrument = os.environ.get('VLLM_DECODE_STEP_INSTRUMENT', '0') == '1'
+            if _decode_instrument:
+                torch.hpu.synchronize()
             htorch.core.mark_step()
+            if _decode_instrument:
+                _t_decode_start = time.perf_counter()
             non_flattened_hidden_states, aux_hidden_states, \
                 sample_hidden_states, logits_device = \
                     self._execute_model_generic(
@@ -4105,6 +4110,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 lora_mask,
                 warmup_mode=warmup_mode)
             htorch.core.mark_step()
+            if _decode_instrument:
+                torch.hpu.synchronize()
+                _t_decode_end = time.perf_counter()
+                _decode_us = (_t_decode_end - _t_decode_start) * 1e6
+                if not hasattr(self, '_decode_step_stats'):
+                    self._decode_step_stats = {'count': 0, 'total_us': 0.0, 'bs_sum': 0}
+                self._decode_step_stats['count'] += 1
+                self._decode_step_stats['total_us'] += _decode_us
+                self._decode_step_stats['bs_sum'] += num_decodes
+                if self._decode_step_stats['count'] % 100 == 0:
+                    n = self._decode_step_stats['count']
+                    avg_us = self._decode_step_stats['total_us'] / n
+                    avg_bs = self._decode_step_stats['bs_sum'] / n
+                    logger.warning("DECODE_STEP n=%d avg=%.0fus avg_bs=%.1f "
+                                   "last=%.0fus last_bs=%d", n, avg_us, avg_bs, _decode_us, num_decodes)
 
             if self.use_structured_output:
                 logits_decode.append(logits_device[:num_decodes])
