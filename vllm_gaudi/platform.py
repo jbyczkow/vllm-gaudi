@@ -144,47 +144,15 @@ class HpuPlatform(Platform):
                 and vllm_config.model_config.is_hybrid):
             model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
             if model_type == "granitemoehybrid":
-                from vllm.utils.math_utils import cdiv
-                from vllm.utils.torch_utils import get_dtype_size
-                from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
-                from vllm.model_executor.models import ModelRegistry
-                model_config = vllm_config.model_config
-                if cache_config.cache_dtype == "auto":
-                    kv_dtype = model_config.dtype
-                else:
-                    from vllm.config.model import STR_DTYPE_TO_TORCH_DTYPE
-                    kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-                attn_1tok = FullAttentionSpec(
-                    block_size=1,
-                    num_kv_heads=model_config.get_num_kv_heads(parallel_config),
-                    head_size=model_config.get_head_size(),
-                    dtype=kv_dtype,
-                ).page_size_bytes
-                model_cls, _ = ModelRegistry.resolve_model_cls(
-                    model_config.architecture,
-                    model_config=model_config,
-                )
-                mamba_page_size = MambaSpec(
-                    shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
-                    dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
-                    block_size=-1,
-                ).page_size_bytes
-                if mamba_page_size > 0:
-                    alignment = 16
-                    attn_block_size = alignment * cdiv(mamba_page_size, alignment * attn_1tok)
-                    if cache_config.block_size < attn_block_size:
-                        logger.info(
-                            "Setting granitemoehybrid block_size to %d tokens "
-                            "(16-token FA alignment, mamba_page_size=%d bytes).",
-                            attn_block_size,
-                            mamba_page_size,
-                        )
-                        cache_config.block_size = attn_block_size
-                        if cache_config.mamba_cache_mode == "align":
-                            cache_config.mamba_block_size = attn_block_size
-                    attn_page = cache_config.block_size * attn_1tok
-                    if attn_page != mamba_page_size:
-                        cache_config.mamba_page_size_padded = attn_page
+                from vllm.model_executor.models.config import HybridAttentionMambaModelConfig
+                # Reset mamba_cache_mode so the upstream re-run takes
+                # the "all" path (computing the chunk-aligned block_size)
+                # rather than the "else" / non-PC path (which gives 528).
+                saved_mode = cache_config.mamba_cache_mode
+                if cache_config.enable_prefix_caching and saved_mode == "align":
+                    cache_config.mamba_cache_mode = "all"
+                HybridAttentionMambaModelConfig.verify_and_update_config(vllm_config)
+                cache_config.mamba_cache_mode = saved_mode
             else:
                 # Other hybrid models (e.g. Qwen3.5): keep original 128-alignment
                 # and mamba_page_size_padded rescaling.
@@ -257,6 +225,18 @@ class HpuPlatform(Platform):
         if get_config().VLLM_CONTIGUOUS_PA:
             logger.warning("Using Contiguous PA, disabling prefix caching")
             vllm_config.cache_config.enable_prefix_caching = False
+
+        if (vllm_config.cache_config.enable_prefix_caching and vllm_config.cache_config.mamba_cache_mode == "all"):
+            vllm_config.cache_config.mamba_cache_mode = "align"
+            logger.info("[HPU] Overriding mamba_cache_mode from 'all' to 'align' "
+                        "to ensure block-aligned chunked prefill splits.")
+
+        if (vllm_config.model_config is not None and vllm_config.model_config.is_hybrid):
+            logger.debug(
+                "[HPU] Hybrid model cache config: block_size=%s, "
+                "mamba_block_size=%s, mamba_cache_mode=%s, "
+                "enable_prefix_caching=%s", cache_config.block_size, getattr(cache_config, "mamba_block_size", None),
+                getattr(cache_config, "mamba_cache_mode", None), cache_config.enable_prefix_caching)
 
         if compilation_config.mode != CompilationMode.NONE:
             logger.info("[HPU] Forcing CompilationMode.NONE "
