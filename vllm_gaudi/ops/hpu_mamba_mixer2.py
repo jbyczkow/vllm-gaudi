@@ -366,7 +366,9 @@ class HPUMambaMixer2(MambaMixer2):
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
         assert self.cache_config is not None
-        enable_prefix_caching = self.cache_config.enable_prefix_caching
+        # EXPERIMENT: force mamba layers to use PC-off path
+        # to confirm prefill state-write overhead is the perf issue
+        enable_prefix_caching = False
         if attn_metadata is not None:
             self_kv_cache = self.kv_cache
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
