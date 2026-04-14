@@ -3948,9 +3948,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_reqs = num_decodes + num_prefills
         if self.use_async_scheduling:
             self.invalid_req_indices: list[int] = []
+        _iter_instrument = os.environ.get('VLLM_ITER_INSTRUMENT', '0') == '1'
+        if _iter_instrument:
+            _t_prep_start = time.perf_counter()
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             prefill_input_data, decode_input_data = self._prepare_inputs(scheduler_output, num_prefills, num_decodes,
                                                                          warmup_mode)
+        if _iter_instrument:
+            _t_prep_end = time.perf_counter()
         prefill_data, \
             dummy_prefill_input_data_batches_across_dp = prefill_input_data
         num_pad_prefill_batch_across_dp = \
@@ -4095,6 +4100,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             _decode_instrument = os.environ.get('VLLM_DECODE_STEP_INSTRUMENT', '0') == '1'
             if _decode_instrument:
                 torch.hpu.synchronize()
+            if _iter_instrument:
+                _t_decode_enqueue = time.perf_counter()
             htorch.core.mark_step()
             if _decode_instrument:
                 _t_decode_start = time.perf_counter()
@@ -4125,6 +4132,36 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     avg_bs = self._decode_step_stats['bs_sum'] / n
                     logger.warning("DECODE_STEP n=%d avg=%.0fus avg_bs=%.1f "
                                    "last=%.0fus last_bs=%d", n, avg_us, avg_bs, _decode_us, num_decodes)
+            if _iter_instrument:
+                _t_decode_done = time.perf_counter()
+                _prep_us = (_t_prep_end - _t_prep_start) * 1e6
+                _decode_us = (_t_decode_done - _t_decode_enqueue) * 1e6
+                if not hasattr(self, '_iter_stats'):
+                    self._iter_stats = {
+                        'count': 0,
+                        'prep_us': 0.0,
+                        'decode_us': 0.0,
+                        'gap_us': 0.0,
+                        'prefill_interleave': 0,
+                        'last_decode_done': 0.0,
+                    }
+                s = self._iter_stats
+                s['count'] += 1
+                s['prep_us'] += _prep_us
+                s['decode_us'] += _decode_us
+                s['prefill_interleave'] += num_prefills
+                if s['last_decode_done'] > 0:
+                    _gap = (_t_decode_enqueue - s['last_decode_done']) * 1e6
+                    s['gap_us'] += _gap
+                s['last_decode_done'] = _t_decode_done
+                if s['count'] % 200 == 0:
+                    n = s['count']
+                    logger.warning(
+                        "ITER_TIMING n=%d avg_prep=%.0fus "
+                        "avg_decode=%.0fus avg_gap=%.0fus "
+                        "avg_prefills=%.1f bs=%d "
+                        "last_prep=%.0fus last_decode=%.0fus", n, s['prep_us'] / n, s['decode_us'] / n,
+                        s['gap_us'] / max(n - 1, 1), s['prefill_interleave'] / n, num_decodes, _prep_us, _decode_us)
 
             if self.use_structured_output:
                 logits_decode.append(logits_device[:num_decodes])
