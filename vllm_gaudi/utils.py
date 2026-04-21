@@ -4,7 +4,9 @@ from vllm.config import ModelConfig
 import vllm.utils.torch_utils as torch_utils
 from vllm_gaudi.extension.runtime import get_config
 import vllm.v1.core.sched.async_scheduler as _async_sched_module
+import vllm.v1.core.sched.scheduler as _sched_module
 from vllm_gaudi.v1.core.sched.hpu_async_scheduler import HPUAsyncScheduler
+from vllm_gaudi.v1.core.sched.hpu_scheduler import HPUScheduler
 from typing import (Any, Optional, TypeVar, Union)
 import torch
 import habana_frameworks.torch as htorch
@@ -290,3 +292,4 @@ class HPUCompileConfig:
 
 
 _async_sched_module.AsyncScheduler = HPUAsyncScheduler
+_sched_module.Scheduler = HPUScheduler

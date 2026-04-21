@@ -2,8 +2,10 @@
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.request import Request
 
+from vllm_gaudi.v1.core.sched.dynamic_batch_size import DynamicBatchSizeMixin
 
-class HPUAsyncScheduler(AsyncScheduler):
+
+class HPUAsyncScheduler(DynamicBatchSizeMixin, AsyncScheduler):
 
     def _mamba_block_aligned_split(
         self,
