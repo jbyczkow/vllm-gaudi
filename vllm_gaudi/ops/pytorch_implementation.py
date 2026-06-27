@@ -4,6 +4,17 @@ import torch
 import torch.nn.functional as F
 
 
+def _bmm4d(a, b):
+    # Batched matmul over the leading two dims, executed as a 3D bmm.
+    # Under torch.compile, fp32 4D torch.matmul lowers to aten.bmm but keeps a
+    # 4D operand -> HPU 'batch1 must be a 3D tensor'. Collapsing the batch dims
+    # to a single 3D bmm keeps the lowering valid (bf16 used a fused 4D recipe).
+    b1, b2, m, k = a.shape
+    n = b.shape[-1]
+    out = torch.bmm(a.reshape(b1 * b2, m, k), b.reshape(b1 * b2, k, n))
+    return out.view(b1, b2, m, n)
+
+
 def new_chunk_cumsum(dt,
                      A,
                      chunk_size,
@@ -66,14 +77,14 @@ def new_chunk_state(B_expanded, x_chunked, dt_t, dA_cumsum_t, states_in_fp32=Tru
     _, _, nheads, hdim = x_chunked.shape
     dstate = B_expanded.shape[-1]
     states_dtype = torch.float32 if states_in_fp32 else B_expanded.dtype
-    x_dtype = x_chunked.dtype
+    x_dtype = torch.float32  # EXPERIMENT(fp32): force fp32 matmul inputs
 
     dA_cs_last = dA_cumsum_t[:, :, -1]
     scale = torch.exp(dA_cs_last.unsqueeze(2) - dA_cumsum_t) * dt_t
     scale = scale.transpose(1, 2).unsqueeze(3)
 
     B_scaled = (B_expanded * scale).to(x_dtype)
-    x_for_bmm = x_chunked.permute(0, 2, 3, 1).flatten(0, 1)
+    x_for_bmm = x_chunked.to(x_dtype).permute(0, 2, 3, 1).flatten(0, 1)
     B_for_bmm = B_scaled.permute(0, 2, 1, 3).flatten(0, 1)
     state = torch.bmm(x_for_bmm, B_for_bmm).view(-1, nheads, hdim, dstate).to(states_dtype)
     return state
@@ -102,9 +113,9 @@ def new_chunk_scan(cb, x_chunked, dt_t, dA_cumsum_t, C, states, output, D=None, 
     _, _, nheads, hdim = x_chunked.shape
     assert nheads % ngroups == 0
     nheads_ngroups_ratio = nheads // ngroups
-    mm_dtype = x_chunked.dtype
+    mm_dtype = torch.float32  # EXPERIMENT(fp32): force fp32 matmul inputs
 
-    x_chunked = x_chunked.transpose(1, 2)
+    x_chunked = x_chunked.transpose(1, 2).to(mm_dtype)
     C = (C.view(nchunks, chunk_size, ngroups, 1, dstate).expand(nchunks, chunk_size, ngroups, nheads_ngroups_ratio,
                                                                 dstate).reshape(nchunks, chunk_size, nheads,
                                                                                 dstate).transpose(1, 2))
@@ -121,11 +132,11 @@ def new_chunk_scan(cb, x_chunked, dt_t, dA_cumsum_t, C, states, output, D=None, 
         z = z.float()
 
     scale = torch.exp(dA_cumsum_t)
-    acc = (C @ prev_states.to(mm_dtype).transpose(-1, -2)).float() * scale.unsqueeze(-1)
+    acc = _bmm4d(C.to(mm_dtype), prev_states.to(mm_dtype).transpose(-1, -2)).float() * scale.unsqueeze(-1)
 
     decay = torch.exp(torch.clamp(dA_cumsum_t.unsqueeze(-1) - dA_cumsum_t.unsqueeze(-2), -30.0, 30))
     cb_scaled = (cb * decay * dt_t.unsqueeze(-2)).to(mm_dtype)
-    acc = acc + (cb_scaled @ x_chunked).float()
+    acc = acc + _bmm4d(cb_scaled, x_chunked).float()  # EXPERIMENT(fp32)
     if D is not None:
         if D.dim() == 1:
             D = D[:, None]
@@ -216,7 +227,9 @@ def new_ssd_bmm(a, b, chunk_size, causal=False, output_dtype=None):
     a = a.view(nchunks, chunk_size, ngroups, k).permute(0, 2, 1, 3)
     b = b.view(nchunks, chunk_size, ngroups, k).permute(0, 2, 3, 1)
 
-    out = torch.matmul(a, b)
+    # fp32 matmul: bf16 here makes CB depend on the batched (nchunks) tiling,
+    # so bucket padding perturbs real-token outputs and flips greedy decodes.
+    out = _bmm4d(a.float(), b.float())
     if causal:
         out = torch.tril(out)
 
